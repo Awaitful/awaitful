@@ -1,5 +1,11 @@
+# packages/cli is intentionally NOT a workspace member. It publishes to npm as
+# "awaitful" and the extension publishes to the Marketplace as "awaitful" too, so
+# both package.json files carry name: "awaitful" - two projects with the same name
+# cannot coexist in one pnpm workspace. The CLI is a zero-dependency installer that
+# needs no workspace wiring, so it stays standalone.
 packages:
-  - 'packages/*'
+  - 'packages/extension'
+  - 'packages/shared'
 # Native build-script decisions (same mechanism the monorepo uses). esbuild and the
 # vsce signing helper build; keytar is an unused transitive dependency of @vscode/vsce,
 # so its native build is explicitly skipped.

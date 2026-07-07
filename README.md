@@ -21,13 +21,13 @@ The `extension` and `shared` sources are published here with each tagged release
 ```
 pnpm install
 pnpm --filter @awaitful/shared build
-pnpm --filter extension build
+pnpm --filter awaitful build
 ```
 
 To reproduce the packaged extension:
 
 ```
-pnpm --filter extension exec vsce package --no-dependencies
+pnpm --filter awaitful exec vsce package --no-dependencies
 ```
 
 The SHA-256 of each published build is recorded under `releases/`. Compare it against the extension you installed to confirm they match.
