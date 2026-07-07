@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+# Native build-script decisions (same mechanism the monorepo uses). esbuild and the
+# vsce signing helper build; keytar is an unused transitive dependency of @vscode/vsce,
+# so its native build is explicitly skipped.
+allowBuilds:
+  esbuild: true
+  '@vscode/vsce-sign': true
+  keytar: false

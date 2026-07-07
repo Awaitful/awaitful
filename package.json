@@ -1,34 +1,19 @@
 {
-  "name": "awaitful",
-  "version": "0.0.1",
-  "description": "Awaitful — earn from your AI coding agent's wait time. https://awaitful.com",
-  "keywords": [
-    "awaitful",
-    "ai",
-    "coding-agent",
-    "claude-code",
-    "vscode",
-    "developer-earnings"
-  ],
-  "homepage": "https://awaitful.com",
-  "bugs": {
-    "url": "https://github.com/awaitful/awaitful/issues"
+  "name": "awaitful-client-mirror",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Public, read-only mirror of the Awaitful client (VS Code extension, npx installer, and the API contract it speaks).",
+  "scripts": {
+    "build": "pnpm --filter @awaitful/shared build && pnpm --filter extension build",
+    "typecheck": "pnpm -r typecheck",
+    "package": "pnpm --filter extension exec vsce package --no-dependencies"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/awaitful/awaitful.git"
+  "devDependencies": {
+    "typescript": "^5.5.0"
   },
-  "license": "MIT",
-  "author": "Awaitful",
-  "bin": {
-    "awaitful": "bin/awaitful.js"
-  },
-  "files": [
-    "bin",
-    "README.md",
-    "LICENSE"
-  ],
   "engines": {
-    "node": ">=18"
-  }
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@11.9.0"
 }

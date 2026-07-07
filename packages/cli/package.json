@@ -1,0 +1,35 @@
+{
+  "name": "awaitful",
+  "version": "0.0.1",
+  "description": "Awaitful - earn from your AI coding agent's wait time. https://awaitful.com",
+  "keywords": [
+    "awaitful",
+    "ai",
+    "coding-agent",
+    "claude-code",
+    "vscode",
+    "developer-earnings"
+  ],
+  "homepage": "https://awaitful.com",
+  "bugs": {
+    "url": "https://github.com/Awaitful/awaitful/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Awaitful/awaitful.git",
+    "directory": "packages/cli"
+  },
+  "license": "MIT",
+  "author": "Awaitful",
+  "bin": {
+    "awaitful": "bin/awaitful.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
