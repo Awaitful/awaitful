@@ -1,0 +1,121 @@
+{
+  "name": "awaitful",
+  "displayName": "Awaitful - Earn while your AI thinks",
+  "description": "Earn while your AI agent thinks. A single sponsored line during thinking time, with revenue shared to you.",
+  "version": "0.7.1",
+  "publisher": "awaitful",
+  "preview": true,
+  "icon": "media/icon.png",
+  "license": "MIT",
+  "private": true,
+  "homepage": "https://awaitful.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Awaitful/awaitful"
+  },
+  "bugs": {
+    "url": "https://github.com/Awaitful/awaitful/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "earn",
+    "earnings",
+    "passive income",
+    "monetize",
+    "revenue",
+    "waiting",
+    "ai",
+    "claude",
+    "codex",
+    "coding agent",
+    "ads"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "awaitful.menu",
+        "title": "Open Panel",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.openPanel",
+        "title": "Open Panel",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.signIn",
+        "title": "Sign In",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.signOut",
+        "title": "Sign Out",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.enable",
+        "title": "Resume Earning",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.disable",
+        "title": "Pause Earning",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.openDashboard",
+        "title": "Open Dashboard",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.about",
+        "title": "About",
+        "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.visitAd",
+        "title": "Visit Sponsor",
+        "category": "Awaitful"
+      }
+    ],
+    "configuration": {
+      "title": "Awaitful",
+      "properties": {
+        "awaitful.apiBaseUrl": {
+          "type": "string",
+          "description": "Awaitful server URL. Leave blank to use the default. Override for local development, e.g. http://localhost:3000.",
+          "default": ""
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@awaitful/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "vitest": "^2.0.0"
+  }
+}

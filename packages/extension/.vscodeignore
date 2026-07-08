@@ -1,0 +1,17 @@
+# The VSIX should contain only the built bundle, the icon, and the manifest/readme/license.
+.vscode/**
+node_modules/**
+src/**
+.turbo/**
+esbuild.config.mjs
+tsconfig.json
+vitest.config.ts
+pnpm-lock.yaml
+.env*
+**/*.map
+**/*.test.*
+**/__tests__/**
+*.vsix
+# Ship only the bundle from dist/ (excludes stale tsc output like index.js/index.d.ts).
+dist/**
+!dist/extension.js
