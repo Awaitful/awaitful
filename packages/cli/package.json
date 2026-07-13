@@ -1,6 +1,6 @@
 {
   "name": "awaitful",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Awaitful - earn from your AI coding agent's wait time. https://awaitful.com",
   "keywords": [
     "awaitful",
@@ -21,14 +21,20 @@
   },
   "license": "MIT",
   "author": "Awaitful",
+  "type": "commonjs",
   "bin": {
     "awaitful": "bin/awaitful.js"
   },
   "files": [
     "bin",
+    "lib",
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=18"
   }

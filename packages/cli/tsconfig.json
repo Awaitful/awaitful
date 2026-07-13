@@ -1,0 +1,20 @@
+{
+  // The CLI is checked JavaScript, not compiled TypeScript, on purpose: a package that ships its
+  // source with no build step is a ten-minute audit and has no toolchain to rot. This config makes
+  // `tsc -p .` a pure checker over the JSDoc types.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "module": "node16",
+    "moduleResolution": "node16",
+    "resolveJsonModule": true,
+    "target": "es2022",
+    "lib": ["es2022"],
+    "types": ["node"]
+  },
+  "include": ["bin/**/*.js", "lib/**/*.js", "test/**/*.js"]
+}
