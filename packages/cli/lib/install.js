@@ -51,16 +51,24 @@ function displayCommand(found) {
 
 /**
  * Run the install with the editor's output streaming straight through (stdio inherit): failures
- * arrive in the editor's own words, not ours. Success is ONLY exit code 0.
+ * arrive in the editor's own words, not ours. Success is ONLY exit code 0. When the process
+ * could not run at all (timeout, binary vanished between detection and now), the underlying
+ * reason comes back too - "exit code unknown" explains nothing.
  *
  * @param {import('./editors').FoundEditor} found
- * @returns {{ ok: boolean; status: number | null }}
+ * @returns {{ ok: boolean; status: number | null; reason: string | null }}
  */
 function installInto(found) {
   const shell = process.platform === 'win32';
   const cmd = shell && found.command.includes(' ') ? `"${found.command}"` : found.command;
   const res = spawnSync(cmd, INSTALL_ARGS, { stdio: 'inherit', shell, timeout: 300_000 });
-  return { ok: res.status === 0, status: res.status };
+  const reason =
+    res.error === undefined
+      ? null
+      : /** @type {NodeJS.ErrnoException} */ (res.error).code === 'ETIMEDOUT'
+        ? 'the editor did not finish within 5 minutes'
+        : res.error.message;
+  return { ok: res.status === 0, status: res.status, reason };
 }
 
 /**

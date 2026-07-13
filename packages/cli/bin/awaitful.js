@@ -12,6 +12,16 @@
  * test/receipts.test.js).
  */
 
+// Before anything else: a clear sentence beats the TypeError an older Node would throw the
+// moment parseArgs is touched. Everything below may assume Node 18+.
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+if (nodeMajor < 18) {
+  console.error(`awaitful needs Node 18 or newer; this is Node ${process.versions.node}.`);
+  console.error('Upgrade Node, or install the extension by hand:');
+  console.error('  https://marketplace.visualstudio.com/items?itemName=awaitful.awaitful');
+  process.exit(1);
+}
+
 const { parseArgs } = require('node:util');
 const { detectEditors, EDITORS } = require('../lib/editors');
 const { chooseTargets, displayCommand, installInto, extensionStatus } = require('../lib/install');
@@ -107,9 +117,11 @@ function runInstall(targets, opts) {
       console.log(`${t.editor.name}: ${green('installed')}`);
     } else {
       failures += 1;
-      console.error(`${t.editor.name}: ${red(`install failed (exit code ${res.status ?? 'unknown'})`)}. The editor's own output is above.`);
+      const why = res.reason ?? `exit code ${res.status ?? 'unknown'}; the editor's own output is above`;
+      console.error(`${t.editor.name}: ${red('install failed')} (${why}).`);
       const manual = t.editor.source === 'VS Code Marketplace' ? MARKETPLACE_URL : OPEN_VSX_URL;
-      console.error(`Manual install: ${manual}`);
+      console.error(`You can install it from the editor's Extensions view (search "Awaitful"),`);
+      console.error(`or from the marketplace directly: ${manual}`);
     }
   }
 
@@ -189,6 +201,8 @@ async function main() {
     } else if (choice.reason === 'not-detected') {
       console.error(`${values.editor} is supported but was not found on this machine.`);
       console.error(`Detected: ${found.map(f => f.editor.id).join(', ') || 'none'}.`);
+      console.error('If it is installed, its command line tool is probably not on your PATH;');
+      console.error('in the editor, run "Shell Command: Install ... command in PATH" from the Command Palette.');
     } else {
       console.error('More than one editor was found, and there is no terminal to ask in.');
       found.forEach(f => console.error(`  --editor ${f.editor.id}   (${f.editor.name})`));
@@ -202,6 +216,11 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error(err instanceof Error ? err.message : String(err));
+  // An unexpected crash is OUR bug until proven otherwise: say so, and say where to report it.
+  console.error(`Unexpected error: ${err instanceof Error ? err.message : String(err)}`);
+  console.error('');
+  console.error('This looks like a bug in the installer, not in your setup.');
+  console.error('Please report it: https://github.com/Awaitful/awaitful/issues');
+  console.error('Meanwhile you can install by hand: search "Awaitful" in your editor\'s Extensions view.');
   process.exit(1);
 });
