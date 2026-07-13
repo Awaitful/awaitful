@@ -1,0 +1,90 @@
+name: Publish CLI to npm
+
+# Publishes packages/cli as the unscoped npm package `awaitful`, with provenance.
+#
+# Why this workflow lives HERE and not in the private monorepo: npm provenance attests
+# "this tarball was built by this workflow, in this repo, at this commit". For that
+# attestation to mean anything to an auditor, it must point at the public, readable
+# source - this repo. The source itself arrives by mirror from the monorepo (see the
+# repo README); this workflow only checks and ships what is already public.
+#
+# Auth is npm TRUSTED PUBLISHING (OIDC): the package's settings on npmjs.com name this
+# repo + workflow file as its trusted publisher, npm authenticates the workflow run
+# itself, and no token exists anywhere to leak or rotate. Provenance is generated as
+# part of the same exchange.
+#
+# MANUAL only, dry-run by default - the same discipline as every outward-facing action:
+# no push or tag ever triggers a publish; the deliberate click is the gate. Re-publishing
+# a version that is already on the registry is refused.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Check, test and pack only - do NOT publish (safe test)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish awaitful to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The OIDC token npm exchanges for a publish credential. This is the whole auth story.
+      id-token: write
+    defaults:
+      run:
+        working-directory: packages/cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          # npm >= 11.5.1 is required for trusted publishing; Node 24 bundles it.
+          node-version: '24'
+
+      - name: Typecheck & test (the receipts run last before anything ships)
+        run: |
+          npx --yes --package typescript tsc -p .
+          node --test
+
+      - name: Refuse to republish an existing version
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view awaitful version 2>/dev/null || echo "none")
+          echo "local=$LOCAL published=$PUBLISHED"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "::error::awaitful@$LOCAL is already on the registry. Bump the version in the monorepo, mirror, then publish."
+            exit 1
+          fi
+
+      - name: Show exactly what would ship
+        run: npm pack --dry-run
+
+      - name: Publish (with provenance)
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --provenance --access public
+
+      - name: Summary
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          {
+            echo "### Publish CLI"
+            echo "- Version: \`$VERSION\`"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "- Mode: **DRY RUN** (checked, tested and packed; nothing published)"
+            else
+              echo "- Published \`awaitful@$VERSION\` to npm with provenance"
+              echo "- https://www.npmjs.com/package/awaitful"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
