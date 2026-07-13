@@ -55,7 +55,10 @@ jobs:
 
       - name: Typecheck & test (the receipts run last before anything ships)
         run: |
-          npx --yes --package typescript tsc -p .
+          # The package itself has zero dependencies (enforced by test); the two checkers are
+          # installed ephemerally and never saved - the tarball's files allowlist cannot ship them.
+          npm install --no-save --no-package-lock typescript @types/node
+          npx tsc -p .
           node --test
 
       - name: Refuse to republish an existing version
