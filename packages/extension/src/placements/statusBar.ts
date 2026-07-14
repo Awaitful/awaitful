@@ -28,7 +28,7 @@ export class StatusBarPlacement {
   }
 
   show(creative: Creative): void {
-    this.ui.showAd(creative.line, !!creative.url);
+    this.ui.showAd(creative.line, !!creative.url, creative.unpaid === true);
     this.ctx?.show(creative);
   }
 

@@ -20,4 +20,14 @@ describe('formatTerminalLine', () => {
     expect(out).toContain('Try Acme');
     expect(out.endsWith(`${ESC}]8;;${ESC}\\`)).toBe(true); // hyperlink close
   });
+
+  it('a spinner frame replaces the static marker; no spinner keeps it', () => {
+    const withSpin = formatTerminalLine({ adId: 'a', slateId: 's', line: 'Try Acme' }, '✻');
+    expect(withSpin).toContain('✻ Try Acme');
+    expect(withSpin).not.toContain('◍');
+
+    // Spinner "none" yields an empty frame: the marker still flags the line as sponsored.
+    const without = formatTerminalLine({ adId: 'a', slateId: 's', line: 'Try Acme' }, '');
+    expect(without).toContain('◍ Try Acme');
+  });
 });

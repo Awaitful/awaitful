@@ -10,6 +10,7 @@ export type MenuActions = {
   about(): void;
   visitAd(): void;
   reloadWindow(): void;
+  customizeAd(): void;
 };
 
 export function registerCommands(
@@ -29,4 +30,5 @@ export function registerCommands(
   cmd('awaitful.about',         () => actions.about());
   cmd('awaitful.visitAd',       () => actions.visitAd());
   cmd('awaitful.reload',        () => actions.reloadWindow());
+  cmd('awaitful.customizeAd',   () => actions.customizeAd());
 }

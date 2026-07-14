@@ -33,10 +33,15 @@ export interface PanelState {
   /** Earned but not yet paid out (lifetime minus payouts). */
   unredeemedUsd: string | undefined;
   disabled: boolean;
+  /** Paused, but the restore to pristine could not be confirmed, so we must not claim the editor is
+   *  unmodified. */
+  pauseRestoreFailed: boolean;
   /** Whether accrued earnings are shown in the VS Code status bar (idle state). */
   showEarningsInStatusBar: boolean;
   /** Set when an ad is currently showing in the status bar. */
   activeAdLine: string | undefined;
+  /** Set when the showing ad is the zero-bid house fallback (bills nobody, pays nothing). */
+  activeAdUnpaid: boolean;
   activeAdUrl: string | undefined;
   /** Chosen chat-banner glow style id, the styles offered, and the shared @keyframes (for the live preview). */
   chatBannerStyle: string;
@@ -45,6 +50,11 @@ export interface PanelState {
   /** Chosen outline frame ('banner' | 'full') and the frames offered. */
   chatBannerFrame: string;
   chatBannerFrames: { id: string; label: string }[];
+  /** Chosen ad spinner id and the gallery offered (frames animate in the Customize ad page). */
+  adSpinner: string;
+  adSpinners: { id: string; label: string; frames: string[]; intervalMs: number }[];
+  /** Whether the developer wants to see advertiser logos. Most ads carry none regardless. */
+  adBrandLogo: boolean;
   /** VS Code surfaces — exactly one active at a time. */
   vsSurfaces: PanelSurface[];
   terminalEnabled: boolean;
@@ -57,6 +67,8 @@ export type PanelMessage =
   | { type: 'sign-in' }
   | { type: 'sign-out' }
   | { type: 'open-dashboard' }
+  | { type: 'set-ad-spinner'; id: string }
+  | { type: 'toggle-ad-logo' }
   | { type: 'set-surface'; id: string }
   | { type: 'set-banner-style'; style: string }
   | { type: 'set-banner-frame'; frame: string }
@@ -139,6 +151,12 @@ export class AwaitfulPanel {
     void this.panel.webview.postMessage({ type: 'state', state });
   }
 
+  /** Steer the open panel to a view ('ad' = the Customize ad page); used by commands and the
+   *  settings link, so every entrance lands on the same page with the same back button. */
+  navigate(view: string): void {
+    void this.panel.webview.postMessage({ type: 'navigate', view });
+  }
+
   dispose(): void {
     AwaitfulPanel.instance = undefined;
     this.panel.dispose();
@@ -147,12 +165,21 @@ export class AwaitfulPanel {
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
 
-function buildHtml(initialState: PanelState): string {
+/**
+ * Exported for the tests, and only for them. Everything below this line is a template literal, which
+ * means TypeScript checks none of it: the CSS is a string, and so is the entire client script. A
+ * typo compiles cleanly and breaks the panel at runtime, in a webview whose console nobody watches.
+ * panel.test.ts parses the script and asserts the CSP, so that class of silence has one guard.
+ */
+export function buildHtml(initialState: PanelState): string {
   const nonce = randomUUID().replace(/-/g, '');
   const csp = [
     `default-src 'none'`,
     `style-src 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
+    // `data:` only, never a remote host: the logo preview must render an <img> the same way the shim
+    // does, and an extension panel that can reach out to the network is a promise we do not make.
+    `img-src data:`,
   ].join('; ');
 
   return `<!DOCTYPE html>
@@ -392,6 +419,32 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .bp-preview.is-full .bp-box{border-color:transparent;border-top-color:var(--border)}   /* the glow is the outer edge */
 .bp-frame-row{display:flex;gap:6px;margin:2px 0 8px}
 .bp-frame{font-size:11px;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:4px 12px;cursor:pointer;transition:all 120ms}
+
+/* ── Customize ad: the brand-logo switch and its live example ── */
+.opt-row{display:flex;align-items:center;gap:12px}
+.opt-text{min-width:0}
+.opt-title{font-size:12px;color:var(--text)}
+.opt-sub{font-size:11px;color:var(--text-3);margin-top:2px;line-height:1.45}
+.opt-row .toggle{flex:0 0 auto;margin-left:auto}
+/* The example is the ad line itself: same order the shim paints, spinner then logo then text. */
+.ad-eg{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;font-size:12px}
+.ad-eg-spin{flex:0 0 1em;width:1em;text-align:left;font-family:var(--vscode-editor-font-family,ui-monospace,'SF Mono',monospace);color:var(--text-2);opacity:.85}
+.ad-eg-logo{width:1.15em;height:1.15em;border-radius:.2em;flex:0 0 auto;object-fit:contain;
+  transition:opacity 160ms cubic-bezier(.32,.72,0,1),width 160ms cubic-bezier(.32,.72,0,1),margin-right 160ms cubic-bezier(.32,.72,0,1)}
+/* Off: collapse the slot rather than just hide it, so the text closes the gap exactly as it will in
+   the editor. Negative margin cancels the flex gap, or the line would keep a phantom logo's width. */
+.ad-eg.off .ad-eg-logo{opacity:0;width:0;margin-right:-8px}
+.ad-eg-text{color:var(--text);text-decoration:underline;overflow:hidden;text-overflow:ellipsis;min-width:0}
+@media (prefers-reduced-motion:reduce){.ad-eg-logo{transition:none}}
+
+/* ── Customize ad: the spinner gallery ── */
+.spin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:8px;margin-top:10px}
+.spin-tile{height:64px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;cursor:pointer;padding:0;transition:border-color 120ms,background 120ms}
+.spin-tile:hover{border-color:var(--border-strong)}
+.spin-tile:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px}
+.spin-tile.on{border-color:var(--active-border);background:var(--active-bg)}
+.spin-glyph{font-family:var(--vscode-editor-font-family,ui-monospace,'SF Mono',monospace);font-size:20px;color:var(--text)}
+.spin-tile.none .spin-glyph{opacity:.4;font-size:11px}
 .bp-frame:hover{border-color:var(--border-strong)}
 .bp-frame.on{color:var(--brand-dark);background:var(--active-bg);border-color:var(--active-border);font-weight:600}
 @media (prefers-reduced-motion:reduce){.bp-glow{animation:none!important}}
@@ -406,6 +459,7 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 /* ── Ad callout (when ad is showing) ── */
 .ad-callout{background:var(--active-bg);border:1px solid var(--active-border);border-radius:8px;padding:10px 12px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px}
 .ad-line{font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ad-unpaid{font-size:11px;color:var(--text-3);margin-top:4px;width:100%}
 .btn-visit{font-size:11px;font-weight:600;color:var(--cta-text);background:var(--cta);border:none;border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:opacity 100ms}
 .btn-visit:hover{opacity:.88}
 
@@ -573,6 +627,7 @@ const META = {
 
 let state = JSON.parse(document.getElementById('initial-state').textContent);
 let hovered = null;  // currently hovered surface id
+let spinCells = [];  // animating tiles on the Customize ad page; rebuilt per render
 
 // ── State application ──────────────────────────────────────────────────────
 function render() {
@@ -580,6 +635,12 @@ function render() {
   const signed = state.signedIn;
 
   root.innerHTML = '';
+  spinCells = [];
+
+  if (state._view === 'ad') {
+    root.appendChild(buildAdView());
+    return;
+  }
 
   if (state._view === 'detail') {
     root.appendChild(buildDetailView(state._detailId));
@@ -603,7 +664,7 @@ function render() {
     const hs = el('div', 'header-sub');
     if (state.unredeemedUsd !== undefined || state.earningsToday !== undefined) {
       const parts = [];
-      if (state.unredeemedUsd !== undefined) parts.push(fmtUsd(state.unredeemedUsd) + ' to redeem');
+      if (state.unredeemedUsd !== undefined) parts.push(fmtUsd(state.unredeemedUsd) + ' unredeemed');
       if (state.earningsToday !== undefined) parts.push(fmtUsd(state.earningsToday) + ' today');
       hs.textContent = parts.join(' · ');
     } else {
@@ -629,7 +690,11 @@ function render() {
   if (signed && state.disabled) {
     const pb = el('div', 'paused-banner');
     const pt = el('div', 'paused-text');
-    pt.innerHTML = '<strong>Paused.</strong> Awaitful is earning nothing, and Claude Code is left unmodified. Resume whenever you like.';
+    // "left unmodified" is a claim about the files on disk, so it may only be made when the restore was
+    // confirmed. If it was not, say what is actually true and point at the manual restore.
+    pt.innerHTML = state.pauseRestoreFailed
+      ? '<strong>Paused.</strong> Awaitful is earning nothing. We could not confirm Claude Code was returned to its original files - use "Restore original files" on the thinking-line page if it is still modified. Resume whenever you like.'
+      : '<strong>Paused.</strong> Awaitful is earning nothing, and Claude Code is left unmodified. Resume whenever you like.';
     const rb = el('button', 'btn-primary'); rb.textContent = 'Resume'; rb.onclick = () => send('toggle-enabled');
     pb.append(pt, rb);
     panel.append(pb);
@@ -646,6 +711,11 @@ function render() {
     vb.onclick = () => send('visit-ad');
     if (!state.activeAdUrl) vb.style.display = 'none';
     ac.append(al, vb);
+    if (state.activeAdUnpaid) {
+      const un = el('div', 'ad-unpaid');
+      un.textContent = 'House message - nothing is bidding right now. It bills nobody and pays nothing.';
+      ac.append(un);
+    }
     panel.append(ac);
   }
 
@@ -679,10 +749,11 @@ function render() {
   const div2 = el('div', 'div');
   const footer = el('div', 'footer');
   const btnDash = el('button', 'btn-ghost'); btnDash.textContent = 'View earnings'; btnDash.onclick = () => send('open-dashboard');
+  const btnSpin = el('button', 'btn-ghost'); btnSpin.textContent = 'Customize ad'; btnSpin.onclick = () => { state._view = 'ad'; render(); };
   const btnToggle = el('button', 'btn-ghost'); btnToggle.textContent = state.disabled ? 'Resume earning' : 'Pause earning'; btnToggle.onclick = () => send('toggle-enabled');
   const btnOut = el('button', 'btn-ghost'); btnOut.textContent = 'Sign out'; btnOut.onclick = () => send('sign-out');
-  if (!signed) { btnDash.disabled = true; btnToggle.disabled = true; btnOut.textContent = 'Sign in'; btnOut.onclick = () => send('sign-in'); }
-  footer.append(btnDash, btnToggle, btnOut);
+  if (!signed) { btnDash.disabled = true; btnSpin.disabled = true; btnToggle.disabled = true; btnOut.textContent = 'Sign in'; btnOut.onclick = () => send('sign-in'); }
+  footer.append(btnDash, btnSpin, btnToggle, btnOut);
   panel.append(div2, footer);
 
   // Fine print — version + source link.
@@ -1222,8 +1293,125 @@ function fmtUsd(s) {
   return '$' + (v < 0.01 ? v.toFixed(4) : v.toFixed(2));
 }
 
+// ── Customize ad page ───────────────────────────────────────────────
+// Same skeleton as a surface detail page: back button, title, description, info-boxes.
+// This page is the developer's control over the FRAME an ad is drawn in - the spinner, the logo.
+// It deliberately offers nothing that touches the MESSAGE (the sponsored line and its link): that
+// is what the advertiser actually bought, and hiding it while still being paid would be a lie.
+
+/**
+ * The stand-in logo. Awaitful advertises on its own network (the house ad), so this is a real ad
+ * that really renders, not a mock-up. SVG is fine HERE because this is our own panel; the server
+ * only ever inlines raster (PNG/JPEG/WebP/GIF) into a real ad.
+ */
+const SAMPLE_LOGO = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+PHJlY3Qgd2lkdGg9JzI0JyBoZWlnaHQ9JzI0JyByeD0nNicgZmlsbD0nIzE3MzQwMCcvPjxwYXRoIGQ9J00xMiA1LjVhNi41IDYuNSAwIDEgMS02LjUgNi41JyBmaWxsPSdub25lJyBzdHJva2U9JyNBMUU5NkYnIHN0cm9rZS13aWR0aD0nMi42JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz48L3N2Zz4=';
+const SAMPLE_LINE = 'Awaitful: Get paid awaiting your AI thinking!';
+
+function buildAdView() {
+  const panel = el('div', 'panel');
+  const back = el('button', 'back'); back.textContent = '← Back'; back.onclick = () => { state._view = 'surfaces'; render(); };
+  panel.append(back);
+
+  const title = el('div', 'detail-title'); title.textContent = 'Customize ad';
+  const desc = el('div', 'detail-desc');
+  desc.textContent = 'How an ad looks to you, on every surface, only while the agent is thinking. The sponsored line always shows; everything around it is yours.';
+  panel.append(title, desc);
+
+  /* ── Spinner ── */
+  const box = el('div', 'info-box');
+  const lbl = el('div', 'info-label'); lbl.textContent = 'Ad spinner';
+  const grid = el('div', 'spin-grid');
+  for (const sp of (state.adSpinners || [])) {
+    const tile = el('button', 'spin-tile');
+    if (!sp.frames.length) tile.classList.add('none');
+    if (state.adSpinner === sp.id) tile.classList.add('on');
+    tile.title = sp.label;
+    tile.setAttribute('aria-label', sp.label);
+    const glyph = el('span', 'spin-glyph');
+    glyph.textContent = sp.frames[0] || 'off';
+    tile.append(glyph);
+    tile.onclick = () => {
+      send('set-ad-spinner', { id: sp.id });
+      state.adSpinner = sp.id;
+      for (const c of grid.children) c.classList.remove('on');
+      tile.classList.add('on');
+    };
+    grid.append(tile);
+    if (sp.frames.length) spinCells.push({ frames: sp.frames, intervalMs: sp.intervalMs, glyph, txt: glyph.textContent });
+  }
+  box.append(lbl, grid);
+
+  /* ── Brand logo ── */
+  const logoBox = el('div', 'info-box');
+  const logoLbl = el('div', 'info-label'); logoLbl.textContent = 'Brand logo';
+
+  const row = el('div', 'opt-row');
+  const text = el('div', 'opt-text');
+  const t = el('div', 'opt-title'); t.textContent = "Show the advertiser's logo";
+  // Say the honest thing: the switch does not summon a logo. Most ads have none, and two of the
+  // three surfaces draw text only, so "on" means "show it when there is one to show".
+  const sub = el('div', 'opt-sub');
+  sub.textContent = 'When the ad has one. Most do not, and the status bar and terminal show text only.';
+  text.append(t, sub);
+
+  const on = state.adBrandLogo !== false;
+  const toggle = el('button', 'toggle');
+  if (on) toggle.classList.add('on');
+  toggle.setAttribute('role', 'switch');
+  toggle.setAttribute('aria-checked', on ? 'true' : 'false');
+  toggle.setAttribute('aria-label', "Show the advertiser's logo");
+  row.append(text, toggle);
+
+  // The example is the ad line itself, in the shim's own order: spinner, logo, text. Toggling
+  // collapses the logo slot and the text closes the gap, exactly as it will in the editor.
+  const eg = el('div', 'ad-eg');
+  if (!on) eg.classList.add('off');
+  const egSpin = el('span', 'ad-eg-spin');
+  const egLogo = el('img', 'ad-eg-logo');
+  egLogo.src = SAMPLE_LOGO;
+  egLogo.setAttribute('alt', '');
+  const egText = el('span', 'ad-eg-text'); egText.textContent = SAMPLE_LINE;
+  eg.append(egSpin, egLogo, egText);
+
+  // Animate the example with the spinner the developer actually chose, off the same wall clock as
+  // every real surface - so the preview cannot drift from the thing it is previewing.
+  const chosen = (state.adSpinners || []).find(sp => sp.id === state.adSpinner);
+  if (chosen && chosen.frames.length) {
+    egSpin.textContent = chosen.frames[0];
+    spinCells.push({ frames: chosen.frames, intervalMs: chosen.intervalMs, glyph: egSpin, txt: chosen.frames[0] });
+  }
+
+  toggle.onclick = () => {
+    const next = !toggle.classList.contains('on');
+    toggle.classList.toggle('on', next);
+    toggle.setAttribute('aria-checked', next ? 'true' : 'false');
+    eg.classList.toggle('off', !next);
+    state.adBrandLogo = next;
+    send('toggle-ad-logo');
+  };
+
+  logoBox.append(logoLbl, row, eg);
+  panel.append(box, logoBox);
+  return panel;
+}
+
+// Wall-clock frames, the same math every real surface uses, so the preview never lies. The loop
+// is idle-cheap: spinCells is empty on every page but Customize ad.
+(function spinTick() {
+  for (const c of spinCells) {
+    const f = c.frames[Math.floor(Date.now() / c.intervalMs) % c.frames.length];
+    if (f !== c.txt) { c.txt = f; c.glyph.textContent = f; }
+  }
+  requestAnimationFrame(spinTick);
+})();
+
 // ── Message handler ───────────────────────────────────────────────────────────
 window.addEventListener('message', e => {
+  if (e.data.type === 'navigate') {
+    state._view = e.data.view;
+    render();
+    return;
+  }
   if (e.data.type === 'state') {
     const view = state._view;
     const detailId = state._detailId;

@@ -10,7 +10,7 @@ const { spawnSync } = require('node:child_process');
  * package names an editor.
  *
  * `source` is informational honesty for the user: VS Code family resolves extension ids against
- * the VS Code Marketplace; Cursor, Windsurf and VSCodium resolve against Open VSX. Awaitful is
+ * the VS Code Marketplace; Cursor, Devin and VSCodium resolve against Open VSX. Awaitful is
  * published to both, which is exactly why this installer never needs to know a version or URL.
  */
 
@@ -44,11 +44,17 @@ const EDITORS = [
     source: 'Open VSX',
   },
   {
-    id: 'windsurf',
-    name: 'Windsurf',
-    bins: ['windsurf'],
-    macPaths: ['/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf'],
-    winPaths: ['Programs/Windsurf/bin/windsurf.cmd'],
+    // The editor formerly named Windsurf. Machines that installed before the rename still have
+    // the windsurf binary and app bundle, so both eras stay in the candidate lists - detection is
+    // probe-gated, so a name that does not exist costs nothing.
+    id: 'devin',
+    name: 'Devin',
+    bins: ['devin', 'windsurf'],
+    macPaths: [
+      '/Applications/Devin.app/Contents/Resources/app/bin/devin',
+      '/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf',
+    ],
+    winPaths: ['Programs/Devin/bin/devin.cmd', 'Programs/Windsurf/bin/windsurf.cmd'],
     source: 'Open VSX',
   },
   {

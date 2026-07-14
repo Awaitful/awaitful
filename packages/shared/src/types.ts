@@ -13,6 +13,13 @@ export interface Creative {
   campaignId: string;
   line: string;
   url?: string;
+  /**
+   * True on the zero-bid house fallback, which serves only when NOTHING is eligible for the paid
+   * draw: it bills nobody and pays nothing, and every client surface must SAY so rather than
+   * implying earnings. The server states the fact; clients only render it. Absent on every
+   * creative that entered the draw.
+   */
+  unpaid?: boolean;
   brand?: {
     name?: string;
     iconUrl?: string;
@@ -205,11 +212,21 @@ export interface EarningsSummary {
   todayUsd: string;
   lifetimeUsd: string;
   /**
-   * Earned but not yet paid out: dev_earning credits minus payout debits
-   * (including payout platform fees). Equals lifetime until payouts go live.
-   * Withdrawable amount at cashout may be less (threshold + holdback).
+   * Earned but not yet paid out: dev_earning credits minus payout debits and clawbacks. Exactly
+   * `availableUsd + pendingUsd`. This is the headline "your money" figure. It is NOT all withdrawable
+   * today, because recently-earned money is still clearing the holdback.
    */
   unredeemedUsd: string;
+  /**
+   * Withdrawable RIGHT NOW: the portion of `unredeemedUsd` that has cleared the holdback. This is the
+   * exact figure the payout gate checks, so a withdrawal can never exceed it. Always >= 0.
+   */
+  availableUsd: string;
+  /**
+   * Earned but still inside the holdback window, so not yet withdrawable. Ages into `availableUsd`.
+   * Equals `unredeemedUsd - availableUsd`.
+   */
+  pendingUsd: string;
   /** Lifetime verified billable views (view_threshold_met) across all surfaces. */
   impressions: number;
   /** Lifetime clicks on ads you showed. */
@@ -251,7 +268,13 @@ export interface CampaignCreative {
   line: string;
   url?: string;
   brandName?: string;
+  /** Where the logo came from, if it was linked. Empty when the advertiser uploaded a file instead. */
   brandIconUrl?: string;
+  /**
+   * The logo bytes we actually ship: downscaled, re-encoded, inlined as a `data:` URI. This is what
+   * renders in the ad line, so this - never the URL - is what the edit screen must preview.
+   */
+  brandIconData?: string;
   moderation: ModerationStatus;
 }
 
@@ -273,7 +296,10 @@ export interface CreateCampaignInput {
   line: string;
   url?: string;
   brandName?: string;
+  /** A logo to fetch and downscale. Mutually exclusive with `brandIconData`; the upload wins. */
   brandIconUrl?: string;
+  /** An uploaded logo (from `POST /v1/logo`). The server re-processes it before it is stored. */
+  brandIconData?: string;
   bidCpm: number;
   dailyBudget: number;
 }
@@ -283,6 +309,8 @@ export interface UpdateCampaignInput {
   url?: string | null;
   brandName?: string | null;
   brandIconUrl?: string | null;
+  /** An uploaded logo. `null` removes the logo entirely. */
+  brandIconData?: string | null;
   bidCpm?: number;
   dailyBudget?: number;
   status?: 'paused' | 'draft' | 'live';
@@ -303,9 +331,7 @@ export interface RateCardData {
 // ── Wallet & payments ─────────────────────────────────────────────────────────
 
 export interface WalletBalance {
-  balanceUsd: string;
-  reservedUsd: string;
-  availableUsd: string;
+  availableUsd: string; // spendable prepaid ad balance (kind-scoped; no separate reserved/total)
 }
 
 export interface PayoutOption {
@@ -327,6 +353,9 @@ export interface UserMe {
   email: string;
   role: UserRole[];
   deviceCount: number;
+  /** external = a real user; internal = the owner's own dev/test/house accounts (wash traffic, and
+   *  the only accounts allowed to create house ads). system = a reserved ledger account. */
+  accountClass: 'external' | 'internal' | 'system';
 }
 
 export interface DeviceInfo {
@@ -414,4 +443,198 @@ export interface BuildGovernanceDetail {
   build: BuildHealth;
   tallies: HashPairTally[];
   blocks: HashBlockInfo[];
+}
+
+// ── Finance: reconciliation & the admin overview (FINANCE.md §8/§9) ───────────
+
+/** One asserted invariant. `detail` is a full sentence even when it passes: a green tick nobody can
+ *  read is not evidence. */
+export interface InvariantResult {
+  name: string;
+  ok: boolean;
+  detail: string;
+  /** A few offending transaction ids, when there are any. Never the whole list. */
+  breaches?: string[];
+}
+
+/** What the platform earned, owes, and holds. Every figure is derived from the ledger. */
+export interface FinanceFigures {
+  // ── Revenue, split three ways ───────────────────────────────────────────────
+  // Once real funding runs, the processor fee the platform ABSORBS (FINANCE.md §5, "you load what you
+  // pay") is a real cost. Collapsed into one "revenue" number it would be invisible, and the first
+  // month of real cash would silently look more profitable than it is.
+  /** SUM(platform_fee): the margin actually taken on real advertiser spend. */
+  grossMarginUsd: number;
+  /** SUM(processing_fee): the pay-in fee we swallowed so the advertiser's wallet credits in full. Negative. */
+  processingFeesUsd: number;
+  /** What is left. EXCLUDES the phase-7A opening balance, which sits on the same account and is an
+   *  accounting artifact, not income. */
+  netRevenueUsd: number;
+  /** The pre-double-entry imbalance, absorbed once and shown for what it is. */
+  openingBalanceUsd: number;
+
+  // ── What we owe ─────────────────────────────────────────────────────────────
+  /** Everything real developers have earned and not yet been paid. */
+  liabilityUsd: number;
+  /** The slice of that a developer could withdraw right now (past the holdback). */
+  payableUsd: number;
+  /** The rest: earned, still clearing. `pending = liability - payable`, by construction. */
+  pendingUsd: number;
+
+  // ── Cash and payouts ────────────────────────────────────────────────────────
+  // The block that becomes the point of this page the day real cash is enabled.
+  /** Real money we are holding: -SUM(system:cash). */
+  cashOnHandUsd: number;
+  /** GROSS actually settled to developers, net of reversals. Money that has left the building. */
+  paidOutUsd: number;
+  /** Requested, debited, and not yet confirmed by the provider. Neither ours nor theirs yet. */
+  inFlightUsd: number;
+  /** What we can cover a payout with: cash on hand + the subsidy we have committed to funding. */
+  coverageUsd: number;
+  /** coverage - liability. The solvency margin, as a number rather than a sentence. */
+  headroomUsd: number;
+
+  // ── Subsidy ─────────────────────────────────────────────────────────────────
+  subsidyBudgetUsd: number;
+  subsidySpentUsd: number;
+  subsidyAvailableUsd: number;
+}
+
+/**
+ * Whether cash can move at all.
+ *
+ * The single most important fact on the page once payouts are enabled, and it is deliberately two
+ * independent switches: `paused` is an admin brake that only ever STOPS money, and `enabledByEnv` is a
+ * server env var that no panel can flip. A UI bug can therefore halt payouts but can never start them.
+ */
+export interface PayoutRail {
+  enabledByEnv: boolean;
+  paused: boolean;
+  live: boolean;
+  minPayoutUsd: number;
+  holdbackDays: number;
+}
+
+/** What triggered a pass. A boot run is attributable to the deploy that caused it; a scheduled one is not. */
+export type ReconciliationTrigger = 'boot' | 'scheduled' | 'manual';
+
+export interface ReconciliationReport {
+  /** When this pass ran. */
+  at: string; // ISO
+  /** When the next SCHEDULED pass will run. The page shows it, so a stale verdict is obviously stale. */
+  nextRunAt: string; // ISO
+  trigger: ReconciliationTrigger;
+  /** How long the pass took. Surfaced so a slow drift is visible long before it is a problem. */
+  tookMs: number;
+  /** When double-entry began. Null on a database that never needed an opening balance. */
+  booksOpenedAt: string | null;
+  ok: boolean;
+  invariants: InvariantResult[];
+  figures: FinanceFigures;
+  payoutRail: PayoutRail;
+}
+
+// ── The auction, as an admin sees it (one page, every ad) ─────────────────────
+
+/** Why an ad is not in the draw. Ordered by how early the gate rejects it. */
+export type IneligibleReason =
+  | 'not-live'         // the campaign is draft / paused / rejected / exhausted
+  | 'not-approved'     // the creative has not cleared moderation
+  | 'budget-spent'     // today's spend has reached the daily budget (pacing)
+  | 'subsidy-off'      // a house ad, and there is no subsidy budget left to pay a real developer with
+  | 'zero-bid';        // a $0 bid has zero weight in the draw, so it can never be picked
+
+export interface AuctionAd {
+  campaignId: string;
+  line: string;
+  brandName: string | null;
+  advertiserEmail: string | null;
+  /** `internal` = a house ad, paid for by the platform's subsidy rather than by an advertiser. */
+  accountClass: 'external' | 'internal' | 'system';
+
+  bidCpm: number;
+  dailyBudgetUsd: number;
+  spentTodayUsd: number;
+
+  status: string;
+  moderation: string | null;
+
+  eligible: boolean;
+  ineligibleReason: IneligibleReason | null;
+
+  /**
+   * The ad's share of the draw: its bid over the total bid of every ELIGIBLE ad. This is the number
+   * that answers "how much delivery am I getting", and it is a probability per slot, not a ranking.
+   */
+  shareOfVoice: number;
+  /** shareOfVoice x rotationSize. What the ad wins, on average, out of each slate's slots. */
+  expectedSlotsPerSlate: number;
+  /** Actually in a slate that is cached and being served RIGHT NOW. */
+  inRotationNow: boolean;
+  /**
+   * The last-resort creative, shown when the auction produces no winner at all. It reaches a developer
+   * by BYPASSING the draw, so it can be on screen (`inRotationNow`) while being unable to win a slot
+   * (`zero-bid`). Without this flag those two facts look like a contradiction; with it, they are one
+   * sentence.
+   */
+  isFallbackCreative: boolean;
+
+  impressions: number;
+  clicks: number;
+}
+
+/** One slate that is cached and being served right now. There is one per placement per audience, plus
+ *  a variant per advertiser whose own ads are being excluded from their own feed. */
+export interface LiveSlate {
+  key: string;
+  placement: string;
+  audience: string;
+  /** The advertiser whose own ads this variant excludes, if it is an exclusion variant. */
+  excludingAdvertiserId: string | null;
+  /** The campaign in each slot, in order. A campaign can appear more than once: the draw is WITH
+   *  replacement, which is how a dominant bidder takes more than one slot. */
+  slots: string[];
+  ttlSeconds: number;
+}
+
+export interface AuctionOverview {
+  /** How many slots a slate has. Every ad competes for these, however many ads there are. */
+  rotationSize: number;
+  /** How long a slate is cached before the draw is re-run. */
+  slateTtlSeconds: number;
+  /** House ads can only be shown to real developers while there is subsidy left to pay them with. */
+  subsidyAvailable: boolean;
+  /** The denominator of every shareOfVoice on the page. */
+  totalEligibleBidCpm: number;
+  ads: AuctionAd[];
+  liveSlates: LiveSlate[];
+}
+
+// ── The public marketplace pulse (Home, and one day the landing page) ─────────
+
+/** One live ad in the public order book. Line, brand and bid ONLY: these are already public by
+ *  nature (the ad is served into strangers' editors, and the market strip shows the top bid to any
+ *  advertiser). The owner's identity is not, and never rides on this type. */
+export interface PulseAd {
+  line: string;
+  brandName: string | null;
+  bidCpm: number;
+}
+
+/**
+ * The marketplace, churning, with no user data in it - safe to show any signed-in account and, one
+ * day, the landing page. Three time horizons on purpose: "right now" proves it is alive, "today"
+ * and "all time" carry the page honestly through the quiet hours when right-now reads zero.
+ */
+export interface MarketPulse {
+  /** The live order book, sorted by bid, highest first. */
+  ads: PulseAd[];
+  /** Σ of every live bid: the size of the pot being competed for. */
+  totalBidPoolCpm: number;
+  /** Verified views per minute, per placement, right now. */
+  impressions: ImpressionStat[];
+  /** Real ledger sums of dev_earning on external accounts. Only ever grow. */
+  paidLastHourUsd: number;
+  paidTodayUsd: number;
+  paidAllTimeUsd: number;
 }

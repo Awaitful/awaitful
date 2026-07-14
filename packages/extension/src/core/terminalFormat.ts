@@ -12,9 +12,15 @@ const MARKER = '◍'; // a small ring
 const STYLE = `${ESC}[1;32m`;
 const RESET = `${ESC}[0m`;
 
-/** Build the styled, optionally-clickable status-line string for a terminal creative. */
-export function formatTerminalLine(c: SurfaceCreative): string {
-  const styled = `${STYLE}${MARKER} ${c.line}${RESET}`;
+/**
+ * Build the styled, optionally-clickable status-line string for a terminal creative.
+ *
+ * `spinnerFrame` replaces the static marker while a spinner is configured: the terminal cannot run
+ * a timer of its own (the agent polls the status line on its own cadence), so the caller computes
+ * the wall-clock frame per poll and the animation comes out coarse but correct.
+ */
+export function formatTerminalLine(c: SurfaceCreative, spinnerFrame = ''): string {
+  const styled = `${STYLE}${spinnerFrame || MARKER} ${c.line}${RESET}`;
   if (!c.url) return styled;
   // OSC 8 hyperlink: clickable in supporting terminals (iTerm2/Kitty/WezTerm), plain text elsewhere.
   return `${ESC}]8;;${c.url}${ST}${styled}${ESC}]8;;${ST}`;

@@ -54,7 +54,7 @@ test('an unknown --editor value names the valid ones', () => {
   const res = run(['--editor', 'emacs']);
   assert.equal(res.status, 2);
   assert.match(res.stderr, /Unknown editor/);
-  assert.match(res.stderr, /code, cursor, windsurf, codium, code-insiders/);
+  assert.match(res.stderr, /code, cursor, devin, codium, code-insiders/);
 });
 
 test('help output carries no em dash', () => {

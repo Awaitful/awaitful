@@ -54,7 +54,7 @@ function printNoEditors() {
   console.error('');
   console.error('You can install the extension by hand instead:');
   console.error(`  VS Code:                      ${MARKETPLACE_URL}`);
-  console.error(`  Cursor, Windsurf, VSCodium:   ${OPEN_VSX_URL}`);
+  console.error(`  Cursor, Devin, VSCodium:      ${OPEN_VSX_URL}`);
 }
 
 /**

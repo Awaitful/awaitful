@@ -345,7 +345,7 @@ describe('restore', () => {
     writePristine();
     const eng = engine();
     eng.apply();
-    expect(eng.restore()).toEqual({ ok: true, changed: true });
+    expect(eng.restore()).toEqual({ ok: true, changed: true, assessed: true });
     expect(readFile(webFile)).toBe(WEB);
     expect(readFile(extFile)).toBe(EXT);
   });
@@ -354,7 +354,7 @@ describe('restore', () => {
     const other = EXT + '\n// other ext\n';
     fs.writeFileSync(webFile, WEB, 'utf8');
     fs.writeFileSync(extFile, other, 'utf8');
-    expect(engine().restore()).toEqual({ ok: true, changed: false });
+    expect(engine().restore()).toEqual({ ok: true, changed: false, assessed: true });
     expect(readFile(extFile)).toBe(other);
   });
 
@@ -363,8 +363,21 @@ describe('restore', () => {
     const eng = engine();
     eng.apply();
     for (const f of fs.readdirSync(storageDir)) fs.rmSync(path.join(storageDir, f));
-    expect(eng.restore()).toEqual({ ok: true, changed: true });
+    expect(eng.restore()).toEqual({ ok: true, changed: true, assessed: true });
     expect(readFile(webFile)).toBe(WEB);
     expect(readFile(extFile)).toBe(EXT);
+  });
+
+  // The honesty distinction behind the "nothing to restore" message: assessed:true means we looked and
+  // found nothing of ours (a real all-clear); assessed:false means no recipe resolved so we could not
+  // look at all, and the caller must NOT claim the editor is unmodified.
+  it('reports assessed:false when no recipe resolves for the build', () => {
+    writePristine();
+    expect(engine(noRecipe).restore()).toEqual({ ok: true, changed: false, assessed: false });
+  });
+
+  it('reports assessed:true when a recipe resolves and no patch of ours is present', () => {
+    writePristine();
+    expect(engine().restore()).toEqual({ ok: true, changed: false, assessed: true });
   });
 });

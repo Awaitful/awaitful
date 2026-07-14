@@ -11,8 +11,12 @@ export interface SurfaceCreative {
    * Optional sponsor logo shown before the ad text; the shim hides the slot when absent.
    * MUST be a `data:` URI — Claude Code's webview CSP is `img-src <cspSource> data:`, so an
    * external https logo is blocked. The server inlines the advertiser's logo as a data: URI.
+   *
+   * Explicitly `| undefined` so `restyle()` can CLEAR it: the developer can turn brand logos off
+   * (`awaitful.adBrandLogo`), and the ad already on screen has to lose its logo without the
+   * impression ending. `JSON.stringify` drops the undefined key, so the shim simply sees no logo.
    */
-  iconUrl?: string;
+  iconUrl?: string | undefined;
   /**
    * Which webview placement the shim should render this as. `thinking-line` covers the
    * spinner verb (the default when absent); `chat-banner` docks a fixed banner above the
@@ -23,6 +27,16 @@ export interface SurfaceCreative {
   bannerStyle?: string;
   /** Chat-banner outline frame: 'banner' (outline the ad, connected to the box) or 'full' (wrap ad+chat). */
   bannerFrame?: string;
+  /**
+   * The ad spinner, as FRAMES rather than an id: the shim renders whatever arrives, so new (or
+   * future user-defined) spinners never require a shim change. Absent or empty = no spinner.
+   * Frames are single-column glyphs (see ui/spinners.ts); the shim derives the current frame from
+   * the wall clock, keeping every surface in sync without shared timers.
+   */
+  spinnerFrames?: string[];
+  spinnerIntervalMs?: number;
+  /** The zero-bid house fallback: bills nobody, pays nothing - and the shim says so. */
+  unpaid?: boolean;
 }
 
 export interface SurfaceBeacon {

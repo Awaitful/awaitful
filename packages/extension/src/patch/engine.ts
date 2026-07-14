@@ -33,6 +33,10 @@ export type ApplyResult =
       ok: false;
       reason: 'no-target' | 'unknown-build' | 'blocked' | 'no-pristine' | 'health-failed' | 'error';
       foreignVendor?: string | undefined;
+      /** For a failure that attempted a rollback (no-pristine / health-failed / error): whether the
+       *  editor was CONFIRMED returned to pristine. When false, our bytes may still be on disk and the
+       *  caller must not claim the editor is safe. Undefined for failures that never wrote anything. */
+      rolledBack?: boolean | undefined;
     };
 
 const TMP_SUFFIX = '.awaitful-tmp';
@@ -172,8 +176,8 @@ export class PatchEngine {
         }
         const pristine = pristineByFile.get(t.file);
         if (!pristine || sha256(pristine) !== t.pristineSha256) {
-          this.restore();
-          return { ok: false, reason: 'no-pristine' };
+          const rb = this.restore();
+          return { ok: false, reason: 'no-pristine', rolledBack: rb.ok };
         }
         this.backups.save(target.buildId, t.pristineSha256, pristine);
         atomicWrite(abs, applyToContent(pristine.toString('utf8'), t));
@@ -186,14 +190,15 @@ export class PatchEngine {
         const after = readOrUndefined(abs)?.toString('utf8');
         const stripped = after !== undefined ? stripFromContent(after, t) : undefined;
         if (stripped === undefined || sha256(stripped) !== t.pristineSha256) {
-          this.restore();
-          return { ok: false, reason: 'health-failed' };
+          const rb = this.restore();
+          return { ok: false, reason: 'health-failed', rolledBack: rb.ok };
         }
       }
       return { ok: true, reloadNeeded: changed };
     } catch {
-      try { this.restore(); } catch { /* ignore */ }
-      return { ok: false, reason: 'error' };
+      let rolledBack = false;
+      try { rolledBack = this.restore().ok; } catch { /* ignore */ }
+      return { ok: false, reason: 'error', rolledBack };
     }
   }
 
@@ -204,10 +209,15 @@ export class PatchEngine {
    * our patch — if a file no longer carries our marker (Claude Code updated, or
    * another extension overwrote it) we must not clobber it with our old bytes.
    */
-  restore(): { ok: true; changed: boolean } | { ok: false } {
+  restore(): { ok: true; changed: boolean; assessed: boolean } | { ok: false } {
     const target = this.target();
     const recipe = target ? this.lookupRecipe(target.buildId) : undefined;
-    if (!target || !recipe) return { ok: true, changed: false };
+    // `assessed: false` means we could not even look: no Claude Code target, or no recipe for this
+    // build. That is NOT the same as "we looked and there is nothing of ours" (assessed: true,
+    // changed: false), and the caller must not tell the user "your editor is unmodified" on the
+    // strength of a check that never ran. A competitor could have patched over us and left no backup,
+    // producing exactly this no-recipe state on the file the user is asking us to clean.
+    if (!target || !recipe) return { ok: true, changed: false, assessed: false };
 
     let changed = false, failed = false;
     for (const t of recipe.targets) {
@@ -237,7 +247,7 @@ export class PatchEngine {
         failed = true;
       }
     }
-    return failed ? { ok: false } : { ok: true, changed };
+    return failed ? { ok: false } : { ok: true, changed, assessed: true };
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────

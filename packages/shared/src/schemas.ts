@@ -76,11 +76,19 @@ export type GetAdQueryInput = z.input<typeof GetAdQuerySchema>;
 
 // ── Campaign CRUD ──────────────────────────────────────────────────────────────
 
+/**
+ * An image the advertiser UPLOADED, as a `data:` URI (what `POST /v1/logo` hands back). The server
+ * re-processes whatever arrives here, so a hand-crafted payload cannot smuggle bytes into an ad.
+ * `null` means "remove the logo". Cap is generous: it is a source image, not what we ship.
+ */
+const uploadedIcon = z.string().startsWith('data:', 'Not an image').max(8_000_000);
+
 export const CreateCampaignSchema = z.object({
   line: z.string().min(3, 'At least 3 characters').max(60, 'At most 60 characters'),
   url: z.string().url('Must be a valid URL').optional(),
   brandName: z.string().max(40).optional(),
   brandIconUrl: z.string().url('Must be a valid URL').optional(),
+  brandIconData: uploadedIcon.optional(),
   bidCpm: z.number().positive().min(0.01, 'Minimum bid is $0.01'),
   dailyBudget: z.number().positive().min(1, 'Minimum budget is $1.00'),
 });
@@ -90,9 +98,23 @@ export const UpdateCampaignSchema = z.object({
   url: z.string().url().nullable().optional(),
   brandName: z.string().max(40).nullable().optional(),
   brandIconUrl: z.string().url().nullable().optional(),
+  brandIconData: uploadedIcon.nullable().optional(),
   bidCpm: z.number().positive().min(0.01).optional(),
   dailyBudget: z.number().positive().min(1).optional(),
   status: z.enum(['paused', 'draft', 'live']).optional(),
+});
+
+/**
+ * House ads play by one different rule: a $0 bid is legitimate.
+ *
+ * For a real advertiser a $0 bid is just a confusing way to pause, so UpdateCampaignSchema floors it
+ * at $0.01. But a house ad at $0 is a real, useful state - "filler only": it shows when nothing else
+ * wins and earns the viewer nothing (the seeded house ad is exactly this). Without $0 here, the
+ * platform's own filler ad could never be edited, and a paid house ad could never be turned back into
+ * filler without deleting it.
+ */
+export const UpdateHouseAdSchema = UpdateCampaignSchema.extend({
+  bidCpm: z.number().min(0).optional(),
 });
 
 export type CreateCampaignInputZod = z.infer<typeof CreateCampaignSchema>;

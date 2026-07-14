@@ -43,7 +43,7 @@ test('chooseTargets: the boring rules, all of them', () => {
     targets: [cursor],
   });
 
-  assert.deepEqual(chooseTargets([code], { editor: 'windsurf', all: false, interactive: true }), {
+  assert.deepEqual(chooseTargets([code], { editor: 'devin', all: false, interactive: true }), {
     kind: 'error',
     reason: 'not-detected',
   });

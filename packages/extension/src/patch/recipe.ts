@@ -52,7 +52,7 @@ export interface PatchRecipe {
 // v20: bumped for the Awaitful rename (the shim body changed — the host↔shim discovery key is now
 // `awaitful`). Future shim changes bump this so an already-Awaitful-patched editor re-patches; a
 // pre-rename CodeCue patch is handled as a foreign modification, not by staleness (see engine.ts).
-export const SHIM_VERSION = 20;
+export const SHIM_VERSION = 24;
 export const MARKER_PREFIX = '/* AWAITFUL-START';
 export const MARKER_START = `${MARKER_PREFIX} v${SHIM_VERSION} */`;
 export const MARKER_END = '/* AWAITFUL-END */';
@@ -196,9 +196,9 @@ const THINKING_SHIM = String.raw`
     var PORT_BASE = 51789, PORT_SPAN = 12, DOCK_GAP = -3;
 
     var origin = null, current = null, overlay = null, faceEl = null, glowEl = null;
-    var iconEl = null, textEl = null, timerEl = null, lastEl = null;
+    var iconEl = null, textEl = null, timerEl = null, lastEl = null, spinEl = null;
     var simStart = 0, lastBeacon = 0, lastLive = 0, askAt = 0, fetching = false, fetchingSince = 0;
-    var rectKey = "", styleAt = 0, fontVal = "", bgVal = "", timerText = "", builtSig = "", verbOffset = 0, glowKey = "";
+    var rectKey = "", styleAt = 0, fontVal = "", bgVal = "", timerText = "", spinText = "", builtSig = "", glowKey = "", contentOffset = 0;
     var cssEl = null, cssText = "";
 
     // Inspectable from the webview devtools: window.__awaitful
@@ -369,12 +369,28 @@ const THINKING_SHIM = String.raw`
     // changes (rotation / mode / theme), never per frame — innerHTML-per-tick detaches the
     // click target mid-click. The hot path only writes text nodes.
     function buildContent(c, parent) {
+      // Ad spinner — the thinking cue restored (the overlay covers CC's own spinner). Frames
+      // arrive in the creative, so new spinners never require a shim change; the rAF loop writes
+      // only the text node, keyed to the wall clock so every surface shows the same frame.
+      spinEl = null; spinText = "";
+      var sf = c.spinnerFrames;
+      if (sf && sf.length && (c.spinnerIntervalMs || 0) > 0) {
+        spinEl = document.createElement("span");
+        spinEl.setAttribute("data-cc-spin", "1");
+        spinEl.setAttribute("aria-hidden", "true");
+        // Fixed 1.25em box, glyph centered: frames are one COLUMN wide but their advance widths
+        // differ in a proportional font, and without this the ad text jitters on every tick.
+        spinEl.style.cssText = "flex:0 0 1em;width:1em;display:inline-flex;align-items:center;justify-content:flex-start;color:var(--vscode-foreground, currentColor);opacity:.85;";
+        spinText = sf[0] || "";
+        spinEl.textContent = spinText;
+        parent.appendChild(spinEl);
+      }
       // Logo slot — an <img> hidden until a creative carries a data: iconUrl. A broken/blocked
       // image hides itself; onerror is wired in JS (CC's CSP blocks inline onerror="").
       iconEl = document.createElement("img");
       iconEl.setAttribute("data-cc-icon", "1");
       iconEl.setAttribute("aria-hidden", "true");
-      iconEl.style.cssText = "width:13px;height:13px;border-radius:3px;flex:0 0 auto;object-fit:contain;display:none;";
+      iconEl.style.cssText = "width:1.15em;height:1.15em;border-radius:.2em;flex:0 0 auto;object-fit:contain;display:none;";
       iconEl.onerror = function () { try { iconEl.style.display = "none"; } catch (e) {} };
       parent.appendChild(iconEl);
       // Only data: URIs render — CC's img-src CSP allows only data: + the webview cspSource,
@@ -401,10 +417,10 @@ const THINKING_SHIM = String.raw`
     }
     function build(c) {
       var banner = c.placement === "chat-banner";
-      var sig = (c.adId || "") + "|" + (c.iconUrl || "") + "|" + (c.line || "") + "|" + (SHOW_TIMER ? "1" : "0") + "|" + (banner ? "b:" + (c.bannerStyle || "") + ":" + (c.bannerFrame || "") : "s");
+      var sig = (c.adId || "") + "|" + (c.iconUrl || "") + "|" + (c.line || "") + "|" + (SHOW_TIMER ? "1" : "0") + "|" + ((c.spinnerFrames || []).join("")) + ":" + (c.spinnerIntervalMs || 0) + "|" + (c.unpaid ? "u" : "p") + "|" + (banner ? "b:" + (c.bannerStyle || "") + ":" + (c.bannerFrame || "") : "s");
       if (sig === builtSig) return;
       builtSig = sig; rectKey = ""; styleAt = 0; fontVal = ""; bgVal = ""; glowKey = "";
-      overlay.textContent = ""; glowEl = null; faceEl = null;
+      overlay.textContent = ""; glowEl = null; faceEl = null; spinEl = null; spinText = "";
       if (banner) {
         overlay.style.overflow = "visible";   // the glow ring extends beyond the face/box
         overlay.style.alignItems = ""; overlay.style.gap = ""; overlay.style.whiteSpace = "";
@@ -432,23 +448,49 @@ const THINKING_SHIM = String.raw`
       } else {
         // The line covers CC's spinner verb: overlay IS the flex row, made opaque in place().
         overlay.style.overflow = "hidden";
-        overlay.style.alignItems = "center"; overlay.style.gap = "6px"; overlay.style.whiteSpace = "nowrap";
+        overlay.style.alignItems = "center"; overlay.style.gap = "4px"; overlay.style.whiteSpace = "nowrap";
         buildContent(c, overlay);
       }
     }
 
-    // Where does the VERB TEXT start? (thinking-line only.) The spinner row is
-    // "<glyph> Verb… <timer>"; the animated glyph (·✢✳…) sits before the verb. We measure
-    // the verb's first letter x from live layout (a read-only DOM Range — never a mutation),
-    // so the ad aligns with the verb AND CC's glyph stays visible to its left. Null when it
-    // can't be measured → caller falls back to the row's left edge (glyph covered, still shown).
-    function verbLeft(el) {
+    function copyFont(fromEl, toEl) {
+      try {
+        var cs = getComputedStyle(fromEl);
+        var f = cs.font || (cs.fontStyle + " " + cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily);
+        if (f && f !== fontVal) { fontVal = f; toEl.style.font = f; }
+      } catch (e) {}
+    }
+
+    // The spinner's cell must be FIXED (a cell that resized per frame would shove the ad text
+    // sideways every tick) and EXACTLY as wide as the widest frame: any wider and the glyph, sitting
+    // flush at the cell's left edge, drifts right of Claude Code's own glyph column. Measured with
+    // the row's own font, so it re-measures if the editor's font or zoom changes.
+    function widestFramePx(frames, fontStr) {
+      try {
+        var ctx = widestFramePx._ctx;
+        if (!ctx) ctx = widestFramePx._ctx = document.createElement("canvas").getContext("2d");
+        ctx.font = fontStr;
+        var max = 0;
+        for (var i = 0; i < frames.length; i++) {
+          var w = ctx.measureText(frames[i]).width;
+          if (w > max) max = w;
+        }
+        return max;
+      } catch (e) { return 0; }
+    }
+
+    // Where the row's own content BEGINS - its spinner glyph - not the row box's left edge, which
+    // sits at the indent's start, a little further left. Anchoring the overlay here drops our
+    // spinner exactly where CC's sat (and still covers it), and it self-corrects to whatever indent
+    // a future build uses. Read-only DOM Range, never a mutation; null when unmeasurable, so the
+    // caller falls back to the row's left edge.
+    function contentLeft(el) {
       try {
         var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
         var node;
         while ((node = w.nextNode())) {
           var t = node.nodeValue || "";
-          var i = t.search(/[A-Za-z]/);          // first letter = start of the verb (glyph is a symbol)
+          var i = t.search(/\S/);                 // first non-whitespace char = the glyph
           if (i < 0) continue;
           var rg = document.createRange();
           rg.setStart(node, i);
@@ -458,13 +500,6 @@ const THINKING_SHIM = String.raw`
         }
       } catch (e) {}
       return null;
-    }
-    function copyFont(fromEl, toEl) {
-      try {
-        var cs = getComputedStyle(fromEl);
-        var f = cs.font || (cs.fontStyle + " " + cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily);
-        if (f && f !== fontVal) { fontVal = f; toEl.style.font = f; }
-      } catch (e) {}
     }
 
     // ---- positioning: over the spinner (line) or docked above the composer (banner) ----
@@ -481,10 +516,23 @@ const THINKING_SHIM = String.raw`
           copyFont(el, ov);
           var bg = solidBg(el);
           if (bg !== bgVal) { bgVal = bg; ov.style.background = bg; }
-          var vx = verbLeft(el);
-          verbOffset = (vx !== null && vx > r.left && vx < r.right) ? (vx - r.left) : 0;
+          // Anchor on the glyph, cached on this slow cadence (stable within a turn) instead of
+          // re-measuring a Range every rAF frame.
+          var cx = contentLeft(el);
+          contentOffset = (cx !== null && cx >= r.left && cx <= r.right) ? (cx - r.left) : 0;
+          // Size the spinner cell to its widest frame so the glyph lands flush on CC's own column.
+          if (spinEl && current && current.spinnerFrames && current.spinnerFrames.length) {
+            var fw = widestFramePx(current.spinnerFrames, fontVal);
+            if (fw > 0) {
+              var fpx = Math.ceil(fw) + "px";
+              if (spinEl.style.width !== fpx) { spinEl.style.width = fpx; spinEl.style.flexBasis = fpx; }
+            }
+          }
         }
-        var left = r.left + verbOffset;                 // align the ad with the verb, not the glyph
+        // Start at the glyph, not the row box's left edge: this covers CC's animated glyph (two
+        // spinners on one line read as a glitch) AND lands our spinner at CC's own indent instead
+        // of a little to its left.
+        var left = r.left + contentOffset;
         var vw = (window.innerWidth || 800);
         var key = left + "," + r.top + "," + r.right + "," + r.height;
         if (key !== rectKey) {
@@ -569,7 +617,7 @@ const THINKING_SHIM = String.raw`
       if (!anchor) return;                 // can't place yet — CC's own indicator stays up
       lastEl = anchor;
       overlay.style.cursor = c.url ? "pointer" : "default";
-      overlay.title = "Sponsored · Awaitful";
+      overlay.title = c.unpaid ? "House message · bills nobody, pays nothing - Awaitful" : "Sponsored · Awaitful";
       reposition(anchor);
       // Hand off: hide CC's spinner ONLY now that our banner is placed (never before).
       if (c.placement === "chat-banner") setCss(hideRule() + GLOW_KF + REDUCED_MOTION);
@@ -578,7 +626,7 @@ const THINKING_SHIM = String.raw`
     function hide() {
       if (overlay) { overlay.style.display = "none"; overlay.style.visibility = "hidden"; }
       setCss("");                          // un-hide CC's spinner (never zero indicators)
-      current = null; simStart = 0; rectKey = ""; timerText = ""; lastBeacon = 0; styleAt = 0; fontVal = ""; bgVal = ""; dbg.overlay = false;
+      current = null; simStart = 0; rectKey = ""; timerText = ""; spinText = ""; lastBeacon = 0; styleAt = 0; fontVal = ""; bgVal = ""; dbg.overlay = false;
     }
     function fmt(ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; }
 
@@ -591,6 +639,11 @@ const THINKING_SHIM = String.raw`
             var t = fmt(Date.now() - simStart);
             if (t !== timerText) { timerText = t; timerEl.textContent = t; }
           }
+          if (spinEl && current.spinnerFrames && current.spinnerFrames.length) {
+            var siv = current.spinnerIntervalMs || 120;
+            var sframe = current.spinnerFrames[Math.floor(Date.now() / siv) % current.spinnerFrames.length] || "";
+            if (sframe !== spinText) { spinText = sframe; spinEl.textContent = sframe; }
+          }
         }
       } catch (e) {}
       try { requestAnimationFrame(frame); } catch (e) { setTimeout(frame, 16); }
@@ -602,7 +655,10 @@ const THINKING_SHIM = String.raw`
       return a.adId !== b.adId || a.line !== b.line ||
         (a.url || "") !== (b.url || "") || (a.iconUrl || "") !== (b.iconUrl || "") ||
         (a.placement || "") !== (b.placement || "") || (a.bannerStyle || "") !== (b.bannerStyle || "") ||
-        (a.bannerFrame || "") !== (b.bannerFrame || "");
+        (a.bannerFrame || "") !== (b.bannerFrame || "") ||
+        ((a.spinnerFrames || []).join("")) !== ((b.spinnerFrames || []).join("")) ||
+        (a.spinnerIntervalMs || 0) !== (b.spinnerIntervalMs || 0) ||
+        (a.unpaid || false) !== (b.unpaid || false);
     }
     function adopt(c) {
       current = c; simStart = Date.now(); lastBeacon = simStart; lastLive = simStart;

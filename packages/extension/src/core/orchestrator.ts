@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
+import { LINKS } from '@awaitful/shared';
 import type { AdEvent, StatusBarState, PlacementId, Creative } from '@awaitful/shared';
 import { apiBaseUrl } from '../lib/config.js';
 import { SlateCache } from './slateCache.js';
@@ -24,6 +25,7 @@ import { writePortFile } from '../hooks/setup.js';
 import { presentAgents, presentStatusLineAgents } from '../agents/registry.js';
 import { writeStatusLineScript, removeStatusLineScript, statusLineScriptPath } from '../hooks/statusLineScript.js';
 import { formatTerminalLine } from './terminalFormat.js';
+import { AD_SPINNERS, getSpinner, frameAt, type AdSpinner } from '../ui/spinners.js';
 import { HttpError } from '../lib/http.js';
 
 // Persisted soft-pause state, so "Paused" survives a restart (like a real Off switch).
@@ -64,6 +66,9 @@ export class Orchestrator {
   private currentDeviceId: string | undefined;
 
   private enabled = true;
+  /** Set when a pause tried to restore Claude Code but could not, so the panel does not claim the
+   *  editor is "left unmodified" when our bytes may still be on disk. */
+  private pauseRestoreFailed = false;
   private hookServer: HookServer | undefined;
   private viewTimer: ViewTimer | undefined;
   private patchWatcher: PatchWatcher | undefined;
@@ -78,8 +83,16 @@ export class Orchestrator {
   private activeAdId: string | undefined;
   private activeSlateId: string | undefined;
   private activeAdLine: string | undefined;
+  private activeAdUnpaid = false;
   private activeAdUrl: string | undefined;
   private activeCreative: Creative | undefined;
+  /**
+   * The webview ad's OWN logo, before the developer's preference is applied. `undefined` whenever
+   * the ad simply has none, which is most of them (a logo is optional for the advertiser). Kept so
+   * that switching `awaitful.adBrandLogo` back on restores what the ad really had, and never invents
+   * a logo for an ad that never carried one.
+   */
+  private activeIconUrl: string | undefined;
   private activePlacement: PlacementId = 'status-bar';
   // True while the status-bar ad is paused because Claude is waiting for the user
   // (a permission prompt / elicitation) — accrual is suspended so idle time never bills.
@@ -193,6 +206,28 @@ export class Orchestrator {
       }),
     );
 
+    // Ad appearance is settings (Settings Sync roams them); when one changes, restyle the LIVE
+    // webview creative so the picker previews in place - the same move as banner styles. The
+    // status bar listens for itself, and the terminal picks the new frames up on its next poll.
+    this.context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('awaitful.adSpinner')) {
+          const s = this.adSpinner();
+          this.surface.restyle({ spinnerFrames: [...s.frames], spinnerIntervalMs: s.intervalMs });
+          this.syncPanel();
+        }
+        if (e.affectsConfiguration('awaitful.adBrandLogo')) {
+          // Put the logo back, or take it away, on the ad that is on screen RIGHT NOW. Same adId,
+          // so no billing state resets - the developer is restyling the frame, not refusing the ad.
+          // Restoring means restoring what the ad ACTUALLY had, which for most ads is nothing:
+          // a logo is optional for the advertiser, so activeIconUrl is undefined far more often
+          // than not, and turning the setting on must never invent one.
+          this.surface.restyle({ iconUrl: this.showBrandLogo() ? this.activeIconUrl : undefined });
+          this.syncPanel();
+        }
+      }),
+    );
+
     this.killswitch.onKillswitchChange((killed) => {
       if (killed) this.haltImpression(); // a server kill must also stop an in-flight impression
       this.applyState(killed ? 'killed' : this.activeState());
@@ -224,6 +259,14 @@ export class Orchestrator {
     try {
       await Promise.all([
         this.slate.refresh(this.currentToken),
+        // The webview slate was created back in reapplyWebviewSurface() - BEFORE the token was
+        // loaded a few lines up - so its first fetch went out anonymous, and an anonymous slate is
+        // NOT personalised: the server cannot exclude the viewer's own campaigns from an ad it
+        // cannot attribute, so a developer who also advertises sees their own line until the next
+        // poll. Re-fetch now that the token exists, so own-ad exclusion applies from the first
+        // frame instead of up to a poll-interval later. (Polling reads the token lazily and keeps
+        // it correct thereafter.)
+        this.webviewSlate?.refresh(this.currentToken).catch(() => {}),
         this.killswitch.check(),
       ]);
       const onSlateUnauthorized = () => {
@@ -311,6 +354,7 @@ export class Orchestrator {
     this.activeAdId = creative.adId;
     this.activeSlateId = this.slate.slateId;
     this.activeAdLine = creative.line;
+    this.activeAdUnpaid = creative.unpaid === true;
     this.activeAdUrl = creative.url;
     this.activeCreative = creative;
     this.activePlacement = 'status-bar';
@@ -341,8 +385,10 @@ export class Orchestrator {
     this.activeAdId = undefined;
     this.activeSlateId = undefined;
     this.activeAdLine = undefined;
+    this.activeAdUnpaid = false;
     this.activeAdUrl = undefined;
     this.activeCreative = undefined;
+    this.activeIconUrl = undefined;
     this.thinkingPaused = false;
     this.surface.end();
     this.placement.hide();
@@ -420,14 +466,21 @@ export class Orchestrator {
     this.activeAdId = creative.adId;
     this.activeSlateId = slate.slateId;
     this.activePlacement = placement;
+    // The ad's own logo, kept unstripped: `undefined` for the many ads that simply do not have one
+    // (it is optional for the advertiser), and the value to restore if logos are switched back on.
+    this.activeIconUrl = creative.brand?.iconUrl;
     this.surface.begin({
       adId: creative.adId,
       slateId: slate.slateId ?? '',
       line: creative.line,
       placement,
       ...(creative.url !== undefined ? { url: creative.url } : {}),
-      ...(creative.brand?.iconUrl ? { iconUrl: creative.brand.iconUrl } : {}),
+      // Two independent reasons there is no logo here, and they must not be confused: the ad never
+      // had one, or the developer turned logos off. Hence an AND, never a default.
+      ...(this.showBrandLogo() && this.activeIconUrl ? { iconUrl: this.activeIconUrl } : {}),
       ...(placement === 'chat-banner' ? { bannerStyle: this.chatBannerStyle(), bannerFrame: this.chatBannerFrame() } : {}),
+      ...this.spinnerPayload(),
+      ...(creative.unpaid ? { unpaid: true } : {}),
     });
     // Status bar stays a plain earning indicator — the ad shows in the webview.
   }
@@ -471,7 +524,7 @@ export class Orchestrator {
     if (!this.terminalEnabled || this.thinkingPaused) return null;
     if (!this.enabled || this.killswitch.isKilled) return null;
     const c = this.terminalSurface.current;
-    return c ? formatTerminalLine(c) : null;
+    return c ? formatTerminalLine(c, frameAt(this.adSpinner(), Date.now())) : null;
   }
 
   /**
@@ -513,7 +566,18 @@ export class Orchestrator {
     await this.consent.grant('terminal');
     this.terminalEnabled = true;
     await this.context.globalState.update(TERMINAL_ENABLED_KEY, true);
-    await this.ensureTerminalInstalled();
+    const { installed, present } = await this.ensureTerminalInstalled();
+
+    // We only claim "enabled" when we actually wrote the status line into at least one agent. If agents
+    // were present but every write failed (a read-only or corp-managed ~/.claude/settings.json), saying
+    // "enabled" would send the user hunting for a line that will never appear. Tell them the truth.
+    if (present > 0 && installed === 0) {
+      await vscode.window.showWarningMessage(
+        'Awaitful: could not write the terminal status line - Claude Code\'s settings file may be read-only or managed. Nothing was changed. Check the file permissions and try again.',
+      );
+      return;
+    }
+
     // Claude Code reads the statusLine when a session starts, so it appears on the next new/reloaded
     // Claude Code session, not necessarily the one currently running.
     const pick = await vscode.window.showInformationMessage(
@@ -536,17 +600,24 @@ export class Orchestrator {
   }
 
   /** Write the shared status-line script + register it for every present status-line agent. Idempotent. */
-  private async ensureTerminalInstalled(): Promise<void> {
+  /** Returns how many present agents we could ACTUALLY install into, and how many were present, so the
+   *  caller can tell "installed" from "tried and every write failed" without ever crashing activation. */
+  private async ensureTerminalInstalled(): Promise<{ installed: number; present: number }> {
     await writeStatusLineScript();
     const scriptPath = statusLineScriptPath();
-    for (const agent of await presentStatusLineAgents()) {
-      try { await agent.installStatusLine(scriptPath); } catch { /* fail-safe: never break activation on a config-write fault */ }
+    const agents = await presentStatusLineAgents();
+    let installed = 0;
+    for (const agent of agents) {
+      // Still caught per-agent: a read-only ~/.claude/settings.json must never break activation. But
+      // the failure is now COUNTED, not silently discarded, so we do not later claim success.
+      try { await agent.installStatusLine(scriptPath); installed++; } catch { /* fail-safe */ }
     }
     if (!this.terminalSlate) {
       this.terminalSlate = new SlateCache(this.base, 'terminal');
       this.terminalSlate.refresh(this.currentToken).catch(() => {});
       this.terminalSlate.startPolling(60_000, () => this.currentToken);
     }
+    return { installed, present: agents.length };
   }
 
   /** Restore every agent's original status line + delete our script (reversible, per the golden rules). */
@@ -597,7 +668,7 @@ export class Orchestrator {
     if (!this.showEarningsInStatusBar) return undefined;
     const v = parseFloat(this.unredeemedUsd ?? '0');
     if (!(v >= 0.01)) return undefined;
-    const tooltip = `Awaitful · ${this.fmtUsd(this.unredeemedUsd)} to redeem · ${this.fmtUsd(this.earningsToday)} today — click to manage`;
+    const tooltip = `Awaitful · ${this.fmtUsd(this.unredeemedUsd)} unredeemed · ${this.fmtUsd(this.earningsToday)} today · click to manage`;
     return { amount: '$' + v.toFixed(2), tooltip };
   }
 
@@ -683,14 +754,19 @@ export class Orchestrator {
       earningsToday: this.earningsToday,
       unredeemedUsd: this.unredeemedUsd,
       disabled: !this.enabled,
+      pauseRestoreFailed: this.pauseRestoreFailed,
       showEarningsInStatusBar: this.showEarningsInStatusBar,
       activeAdLine: this.activeAdLine,
+      activeAdUnpaid: this.activeAdUnpaid,
       activeAdUrl: this.activeAdUrl,
       chatBannerStyle: this.chatBannerStyle(),
       chatBannerFrame: this.chatBannerFrame(),
       chatBannerFrames: BANNER_FRAMES.map((x) => ({ id: x.id, label: x.label })),
       chatBannerKeyframes: GLOW_KEYFRAMES,
       chatBannerThemes: GLOW_THEMES.map((t) => ({ id: t.id, label: t.label, swatch: t.swatch, background: t.background, animation: t.animation })),
+      adSpinner: this.adSpinner().id,
+      adSpinners: AD_SPINNERS.map((sp) => ({ id: sp.id, label: sp.label, frames: [...sp.frames], intervalMs: sp.intervalMs })),
+      adBrandLogo: this.showBrandLogo(),
       vsSurfaces: [
         {
           id: 'status-bar',
@@ -767,6 +843,19 @@ export class Orchestrator {
       case 'open-dashboard':
         void this.openDashboard();
         break;
+      case 'set-ad-spinner':
+        if (AD_SPINNERS.some((sp) => sp.id === msg.id)) {
+          void vscode.workspace.getConfiguration('awaitful').update('adSpinner', msg.id, vscode.ConfigurationTarget.Global);
+        }
+        break;
+      case 'toggle-ad-logo':
+        // Write the setting and stop. The config listener above does the rest (restyle the live ad,
+        // re-sync the panel), so the toggle behaves identically whether it was flipped here or in
+        // VS Code's own settings UI - one path, not two that can drift.
+        void vscode.workspace
+          .getConfiguration('awaitful')
+          .update('adBrandLogo', !this.showBrandLogo(), vscode.ConfigurationTarget.Global);
+        break;
       case 'toggle-enabled':
         if (this.enabled) this.disable(); else this.enable();
         break;
@@ -794,14 +883,10 @@ export class Orchestrator {
         this.reloadWindow();
         break;
       case 'open-github':
-        void vscode.env.openExternal(
-          vscode.Uri.parse('https://github.com/Awaitful/awaitful'),
-        );
+        void vscode.env.openExternal(vscode.Uri.parse(LINKS.sourceCode));
         break;
       case 'open-privacy':
-        void vscode.env.openExternal(
-          vscode.Uri.parse('https://github.com/Awaitful/awaitful/blob/HEAD/PRIVACY.md'),
-        );
+        void vscode.env.openExternal(vscode.Uri.parse(LINKS.egressManifest));
         break;
       case 'visit-ad':
         if (this.activeAdUrl) {
@@ -894,15 +979,25 @@ export class Orchestrator {
         );
         break;
       case 'no-target':
+        // Claude Code is not installed in THIS window - a different fact from "your build is not
+        // supported yet", which would send the user looking for a version fix that is not the problem.
+        vscode.window.showInformationMessage(
+          `Awaitful: Claude Code is not installed in this window, so the ${surfaceLabel(id)} surface has nothing to attach to. Status-bar mode is active.`,
+        );
+        break;
       case 'unknown-build':
         vscode.window.showInformationMessage(
-          `Awaitful: the ${surfaceLabel(id)} surface is not available for this Claude Code build yet. Status-bar mode is active.`,
+          `Awaitful: the ${surfaceLabel(id)} surface is not available for this Claude Code build yet. Status-bar mode is active and earning.`,
         );
         break;
       case 'health-failed':
       case 'error':
+        // "rolled back to keep your editor safe" is a claim the rollback SUCCEEDED. When it did not,
+        // our bytes may still be on disk, and saying "safe" is the worst possible lie here.
         vscode.window.showWarningMessage(
-          'Awaitful: patching was rolled back to keep your editor safe. Status-bar mode is active.',
+          res.rolledBack === false
+            ? 'Awaitful: patching failed and could not be fully undone. Open the thinking-line page and use "Restore original files" to return Claude Code to its original state.'
+            : 'Awaitful: patching was rolled back to keep your editor safe. Status-bar mode is active.',
         );
         break;
     }
@@ -1085,6 +1180,38 @@ export class Orchestrator {
   }
 
   /** The chosen chat-banner glow style, validated against the shipped registry (never trusted raw). */
+  /** The configured ad spinner. A cosmetic preference, so unknown ids quietly fall back. */
+  /**
+   * Does this developer want to see advertiser logos? Theirs to choose: they own the FRAME the ad is
+   * drawn in (spinner, logo), never the MESSAGE (the line and its link, which always render - that is
+   * what the advertiser actually bought, and what golden rule 3 bills for).
+   *
+   * Defaults to on: an advertiser who bothered to supply a logo has earned it, and a logo makes it
+   * plainer that the line is an ad and whose it is, which serves the developer too.
+   */
+  private showBrandLogo(): boolean {
+    return vscode.workspace.getConfiguration('awaitful').get<boolean>('adBrandLogo') ?? true;
+  }
+
+  private adSpinner(): AdSpinner {
+    return getSpinner(vscode.workspace.getConfiguration('awaitful').get<string>('adSpinner'));
+  }
+
+  /** The spinner as creative-payload fields; empty frames (spinner "none") send nothing. */
+  private spinnerPayload(): { spinnerFrames?: string[]; spinnerIntervalMs?: number } {
+    const s = this.adSpinner();
+    return s.frames.length ? { spinnerFrames: [...s.frames], spinnerIntervalMs: s.intervalMs } : {};
+  }
+
+  customizeAd(): void {
+    AwaitfulPanel.openOrReveal(
+      this.context,
+      (msg) => this.handlePanelMessage(msg),
+      this.buildPanelState(),
+    ).navigate('ad');
+    void this.refreshAccount();
+  }
+
   private chatBannerStyle(): string {
     const s = this.context.globalState.get<string>(BANNER_STYLE_KEY);
     return s && GLOW_THEMES.some((t) => t.id === s) ? s : DEFAULT_GLOW_THEME;
@@ -1133,8 +1260,15 @@ export class Orchestrator {
         'Reload window',
       );
       if (pick === 'Reload window') await vscode.commands.executeCommand('workbench.action.reloadWindow');
-    } else if (r.ok) {
+    } else if (r.ok && r.assessed) {
+      // We looked at every target and none carries our patch: a verified clean bill.
       vscode.window.showInformationMessage('Awaitful: nothing to restore - no Awaitful changes are present.');
+    } else if (r.ok) {
+      // ok but NOT assessed: no recipe resolved for this build, so we could not actually check. Do not
+      // claim the editor is clean on a check that never ran - a competitor may have patched over us.
+      vscode.window.showWarningMessage(
+        'Awaitful: could not verify Claude Code for this build, so nothing was changed. If another extension has modified it, restore from that extension. The file path is in the panel.',
+      );
     } else {
       vscode.window.showWarningMessage('Awaitful: could not restore automatically. See the panel for the file path.');
     }
@@ -1223,6 +1357,7 @@ export class Orchestrator {
   /** Resume from a soft pause: earn again and re-apply the patch if consented. */
   enable(): void {
     this.enabled = true;
+    this.pauseRestoreFailed = false; // no longer paused; the pause-time restore state is moot
     void this.context.globalState.update(ENABLED_KEY, true);
     this.reapplyWebviewSurface(); // re-apply the patch we removed on pause
     this.applyState(this.activeState());
@@ -1239,14 +1374,23 @@ export class Orchestrator {
     this.enabled = false;
     void this.context.globalState.update(ENABLED_KEY, false);
     this.haltImpression();              // stop any in-flight status-bar accrual immediately
-    try { this.patch.restore(); } catch { /* fail-safe */ }
+    // Capture whether the restore left Claude Code genuinely un-ours. The panel says "Claude Code is
+    // left unmodified" while paused, and that must be TRUE. restore() returns ok:false in exactly the
+    // case that makes it false: it found our patch on disk but could not write pristine back (a
+    // read-only extensions dir, a disk full). Then our bytes remain, and the banner must say so rather
+    // than give a false all-clear. A throw is treated the same way - we did not confirm removal.
+    let restored = false;
+    try {
+      restored = this.patch.restore().ok;
+    } catch { /* fail-safe */ }
+    this.pauseRestoreFailed = !restored;
     this.activeSurface = 'status-bar';  // patch restored → thinking-line is no longer live
     this.applyState('off');
     this.syncPanel();
   }
 
   async openDashboard(): Promise<void> {
-    await vscode.env.openExternal(vscode.Uri.parse(`${apiBaseUrl()}/dashboard`));
+    await vscode.env.openExternal(vscode.Uri.parse(`${apiBaseUrl()}/earnings`));
   }
 
   about(): void {

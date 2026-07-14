@@ -97,6 +97,41 @@ describe('SurfaceSession', () => {
     s.rendered(beacon());                        // must NOT re-fire (rendered already counted)
     expect(events.filter((e) => e.type === 'impression_rendered')).toHaveLength(1);
   });
+
+  /**
+   * The developer owns the FRAME an ad is drawn in (spinner, logo); they never get to suppress the
+   * MESSAGE. So switching brand logos off must strip the logo from the ad already on screen WITHOUT
+   * ending the impression - the ad is still there, still read, still billable. If this reset billing
+   * state, flipping the switch mid-ad would either lose the advertiser a paid impression or hand the
+   * developer a second one.
+   */
+  it('restyle() strips the logo live, and the impression keeps counting', () => {
+    const { s, events } = make();
+    s.begin({ adId: 'ad-1', slateId: 'slate-1', line: 'x', iconUrl: 'data:image/webp;base64,AAA' });
+    s.rendered(beacon());
+
+    s.restyle({ iconUrl: undefined });           // developer turned logos off
+    expect(s.current?.iconUrl).toBeUndefined();
+    expect(s.current?.adId).toBe('ad-1');        // same ad — the message is untouched
+    expect(s.current?.line).toBe('x');
+
+    s.restyle({ iconUrl: 'data:image/webp;base64,AAA' });  // and back on
+    expect(s.current?.iconUrl).toBe('data:image/webp;base64,AAA');
+
+    s.rendered(beacon());
+    expect(events.filter((e) => e.type === 'impression_rendered')).toHaveLength(1);
+  });
+
+  // A logo is OPTIONAL for the advertiser, so most ads simply have none. Turning the setting on must
+  // never invent one: "show logos" means "show it when there is one", not "put something there".
+  it('has no logo for an ad that never carried one, however the setting is set', () => {
+    const { s } = make();
+    s.begin({ adId: 'ad-2', slateId: 'slate-1', line: 'no logo here' });
+    expect(s.current?.iconUrl).toBeUndefined();
+    s.restyle({ iconUrl: undefined });           // "logos on" restores the ad's own logo: nothing
+    expect(s.current?.iconUrl).toBeUndefined();
+    expect('iconUrl' in (s.current ?? {})).toBe(true); // present-but-undefined; JSON drops the key
+  });
 });
 
 // ── HookServer: HTTP routing + CORS + beacon dispatch ────────────────────────

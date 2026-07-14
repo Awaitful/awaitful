@@ -2,7 +2,7 @@
   "name": "awaitful",
   "displayName": "Awaitful - Earn while your AI thinks",
   "description": "Earn while your AI agent thinks. A single sponsored line during thinking time, with revenue shared to you.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "awaitful",
   "preview": true,
   "icon": "media/icon.png",
@@ -87,6 +87,11 @@
         "command": "awaitful.visitAd",
         "title": "Visit Sponsor",
         "category": "Awaitful"
+      },
+      {
+        "command": "awaitful.customizeAd",
+        "title": "Customize Ad",
+        "category": "Awaitful"
       }
     ],
     "configuration": {
@@ -96,6 +101,29 @@
           "type": "string",
           "description": "Awaitful server URL. Leave blank to use the default. Override for local development, e.g. http://localhost:3000.",
           "default": ""
+        },
+        "awaitful.adSpinner": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "dots",
+            "line",
+            "circle-halves",
+            "square-quarters",
+            "triangle",
+            "arrows",
+            "pulse",
+            "star",
+            "toggle",
+            "none"
+          ],
+          "default": "claude",
+          "markdownDescription": "The animation shown before the sponsored line while your agent thinks, on every surface. Pick visually, with every spinner animating: [Open the Customize Ad picker](command:awaitful.customizeAd)."
+        },
+        "awaitful.adBrandLogo": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the advertiser's logo before the sponsored line. Not every ad carries one, and the status bar and terminal draw text only, so turning this on does not add a logo where there is none. The sponsored line itself always shows. [Open the Customize ad page](command:awaitful.customizeAd)."
         }
       }
     }

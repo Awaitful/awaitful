@@ -19,7 +19,7 @@ way it updates everything else.
 | ---------------- | --------------- | -------------------- |
 | VS Code          | `code`          | VS Code Marketplace  |
 | Cursor           | `cursor`        | Open VSX             |
-| Windsurf         | `windsurf`      | Open VSX             |
+| Devin            | `devin`         | Open VSX             |
 | VSCodium         | `codium`        | Open VSX             |
 | VS Code Insiders | `code-insiders` | VS Code Marketplace  |
 
@@ -53,7 +53,7 @@ It never reads your code, prompts, files, or your agent's output.
 No npm handy, or you would rather not run an installer at all:
 
 - VS Code: [marketplace.visualstudio.com/items?itemName=awaitful.awaitful](https://marketplace.visualstudio.com/items?itemName=awaitful.awaitful)
-- Cursor, Windsurf, VSCodium: [open-vsx.org/extension/awaitful/awaitful](https://open-vsx.org/extension/awaitful/awaitful)
+- Cursor, Devin, VSCodium: [open-vsx.org/extension/awaitful/awaitful](https://open-vsx.org/extension/awaitful/awaitful)
 
 Or from any of those editors directly: search "Awaitful" in the Extensions view.
 
@@ -61,7 +61,7 @@ Or from any of those editors directly: search "Awaitful" in the Extensions view.
 
 **"No supported editor was found"** - your editor's CLI is probably not on the PATH. In VS Code
 open the Command Palette and run "Shell Command: Install 'code' command in PATH" (Cursor,
-Windsurf and VSCodium have equivalents), or install manually with the links above.
+Devin and VSCodium have equivalents), or install manually with the links above.
 
 **Several editors, non-interactive shell** - pick one explicitly: `npx awaitful --editor code`,
 or take them all: `npx awaitful --all`.
