@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LINKS } from '../constants.js';
+import { LINKS, SOCIAL } from '../constants.js';
 
 /**
  * The trust receipts are the product's whole differentiator: every competitor writes "we never read
@@ -54,5 +54,19 @@ describe('public links', () => {
 
   it('the npx command is exactly the published package name', () => {
     expect(LINKS.npxInstall).toBe('npx awaitful');
+  });
+});
+
+describe('social profiles', () => {
+  it('every handle is a real, absolute https URL with a unique id', () => {
+    const ids = new Set<string>();
+    for (const { id, label, href } of SOCIAL) {
+      expect(() => new URL(href), `${id} is not a URL`).not.toThrow();
+      expect(href.startsWith('https://'), `${id} is not https`).toBe(true);
+      expect(label.length, `${id} has no label`).toBeGreaterThan(0);
+      expect(ids.has(id), `duplicate social id ${id}`).toBe(false);
+      ids.add(id);
+    }
+    expect(ids.size).toBeGreaterThan(0);
   });
 });

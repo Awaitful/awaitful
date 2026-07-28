@@ -91,6 +91,10 @@ export const CreateCampaignSchema = z.object({
   brandIconData: uploadedIcon.optional(),
   bidCpm: z.number().positive().min(0.01, 'Minimum bid is $0.01'),
   dailyBudget: z.number().positive().min(1, 'Minimum budget is $1.00'),
+  // Optional lifetime cap. Absent means "no cap" (paces daily, runs until the wallet is empty). When
+  // set, the daily-vs-total and total-vs-unassigned-wallet rules are enforced in the route (which has
+  // the wallet + the advertiser's other campaigns to check against).
+  totalBudget: z.number().positive().min(1, 'Minimum total budget is $1.00').optional(),
 });
 
 export const UpdateCampaignSchema = z.object({
@@ -101,6 +105,8 @@ export const UpdateCampaignSchema = z.object({
   brandIconData: uploadedIcon.nullable().optional(),
   bidCpm: z.number().positive().min(0.01).optional(),
   dailyBudget: z.number().positive().min(1).optional(),
+  // `null` clears the cap back to "no cap"; a number sets/changes it.
+  totalBudget: z.number().positive().min(1).nullable().optional(),
   status: z.enum(['paused', 'draft', 'live']).optional(),
 });
 
@@ -169,3 +175,21 @@ export const PatchReportRequestSchema = z.object({
 export type RecipeResponseInput = z.input<typeof RecipeResponseSchema>;
 export type GetRecipeQueryInput = z.input<typeof GetRecipeQuerySchema>;
 export type PatchReportRequestInput = z.input<typeof PatchReportRequestSchema>;
+
+/* ── Docs feedback ──────────────────────────────────────────────────────────── */
+
+export const DocFeedbackKindSchema = z.enum(['helpful', 'unhelpful', 'outdated']);
+
+/**
+ * A reader marking a docs page. Anonymous by construction: the request carries the page, the kind
+ * and an optional note - no account, no device, no address. The slug charset is pinned so the table
+ * can only ever contain plausible page names, whatever the client sends.
+ */
+export const DocFeedbackRequestSchema = z.object({
+  slug: z.string().regex(/^[a-z0-9-]{1,64}$/),
+  kind: DocFeedbackKindSchema,
+  note: z.string().trim().min(1).max(500).optional(),
+});
+
+export type DocFeedbackKindInput = z.input<typeof DocFeedbackKindSchema>;
+export type DocFeedbackRequestInput = z.input<typeof DocFeedbackRequestSchema>;

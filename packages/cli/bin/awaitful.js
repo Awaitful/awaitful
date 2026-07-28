@@ -114,7 +114,14 @@ function runInstall(targets, opts) {
     console.log(`${bold(t.editor.name)}: ${dim(displayCommand(t))}`);
     const res = installInto(t);
     if (res.ok) {
-      console.log(`${t.editor.name}: ${green('installed')}`);
+      // Say WHICH version landed. We deliberately do not pin one - the editor resolves the id
+      // against its own marketplace and pulls the latest, which is the whole reason this installer
+      // never needs republishing when the extension ships. The cost of that is a blind spot: right
+      // after a release the marketplace is still validating the upload and serves the PREVIOUS
+      // version for a few minutes, and "installed" alone gives you no way to notice. So read it back.
+      const { version } = extensionStatus(t);
+      const what = version ? `installed ${dim(version)}` : 'installed';
+      console.log(`${t.editor.name}: ${green(what)}`);
     } else {
       failures += 1;
       const why = res.reason ?? `exit code ${res.status ?? 'unknown'}; the editor's own output is above`;

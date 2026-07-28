@@ -76,6 +76,7 @@ export type PanelMessage =
   | { type: 'toggle-terminal' }
   | { type: 'restore-files' }
   | { type: 'reload-window' }
+  | { type: 'open-extensions'; query: string }
   | { type: 'open-github' }
   | { type: 'open-privacy' }
   | { type: 'toggle-enabled' }
@@ -221,6 +222,8 @@ body.vscode-light{
   --brand:oklch(86% 0.171 134);--brand-dark:oklch(29% 0.084 135);
   --cta:oklch(29% 0.084 135);--cta-text:#ffffff;
   --active-border:oklch(29% 0.084 135);--active-bg:oklch(96% 0.06 134);
+  --ring:oklch(52% 0.170 145 / 0.32);
+  --warn:oklch(52% 0.140 58);
   --toggle-off:oklch(10% 0.004 135 / 0.18);
 }
 body.vscode-dark,body.vscode-high-contrast{
@@ -230,6 +233,8 @@ body.vscode-dark,body.vscode-high-contrast{
   --brand:oklch(86% 0.171 134);--brand-dark:oklch(86% 0.171 134);
   --cta:oklch(86% 0.171 134);--cta-text:oklch(10% 0.004 135);
   --active-border:oklch(86% 0.171 134);--active-bg:oklch(86% 0.171 134 / 0.09);
+  --ring:oklch(80% 0.190 140 / 0.36);
+  --warn:oklch(80% 0.120 72);
   --toggle-off:oklch(86% 0.171 134 / 0.20);
 }
 /* fallback for unthemed body */
@@ -240,6 +245,8 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
   --brand:oklch(86% 0.171 134);--brand-dark:oklch(86% 0.171 134);
   --cta:oklch(86% 0.171 134);--cta-text:oklch(10% 0.004 135);
   --active-border:oklch(86% 0.171 134);--active-bg:oklch(86% 0.171 134 / 0.09);
+  --ring:oklch(80% 0.190 140 / 0.36);
+  --warn:oklch(80% 0.120 72);
   --toggle-off:rgba(255,255,255,0.18);
 }
 
@@ -313,12 +320,12 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 /* ── Earning-rate chip ── */
 .card-name-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .rate{
-  font-size:10px;font-weight:600;letter-spacing:.02em;
+  font-size:11px;font-weight:700;letter-spacing:.01em;
   color:var(--brand-dark);background:var(--active-bg);
   border:1px solid var(--active-border);border-radius:10px;
-  padding:1px 7px;white-space:nowrap;cursor:default;
+  padding:1px 8px;white-space:nowrap;cursor:default;font-variant-numeric:tabular-nums;
 }
-.rate.base{color:var(--text-3);background:var(--surface-2);border-color:var(--border)}
+.rate.base{color:var(--text-3);background:var(--surface-2);border-color:var(--border);font-weight:600}
 
 /* ── Safe tag (surfaces that change nothing) ── */
 .tag-safe{font-size:10px;font-weight:500;color:var(--brand-dark);display:flex;align-items:center;gap:3px}
@@ -332,11 +339,13 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
   display:flex;align-items:flex-start;gap:10px;
   background:var(--surface);border:1px solid var(--border);
   border-radius:8px;padding:10px 12px;margin-bottom:6px;
-  cursor:pointer;transition:border-color 120ms,background 120ms;
+  cursor:pointer;transition:border-color 120ms,background 120ms,box-shadow 120ms;
   user-select:none;
 }
 .card:hover:not(.active):not(.soon){border-color:var(--border-strong)}
-.card.active{border-color:var(--active-border);background:var(--active-bg);cursor:default}
+/* Selected surface: not a hard 1px outline but the site's focused-field treatment - the accent border
+   plus a soft ring and a little depth, so it reads as chosen, not just bordered. */
+.card.active{border-color:var(--active-border);background:var(--active-bg);box-shadow:0 0 0 3px var(--ring),0 1px 4px rgba(0,0,0,.10);cursor:default}
 .card.soon{opacity:.55;cursor:default}
 /* Signed-out: the surface is visible but deactivated (faded) until sign-in. */
 .card.locked{opacity:.55}
@@ -368,6 +377,20 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .toggle.on::after{transform:translateX(14px)}
 .toggle:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
 
+/* ── Radio (the VS Code surfaces are pick-one; the terminal keeps a switch = additive) ── */
+.radio{width:18px;height:18px;border-radius:50%;border:2px solid var(--border-strong);flex-shrink:0;position:relative;transition:border-color 150ms;background:transparent}
+.card.active .radio{border-color:var(--active-border)}
+.card.active .radio::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--active-border)}
+.card:hover:not(.active):not(.soon) .radio{border-color:var(--text-3)}
+.card:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
+
+/* ── Conflict hint on a card (a competitor changed Claude Code) ── */
+.card-conflict{display:flex;align-items:center;gap:5px;margin-top:6px;padding:0;border:0;background:none;font:inherit;font-size:11px;line-height:1.4;color:var(--text-2);text-align:left;cursor:pointer;width:100%}
+.card-conflict svg{flex-shrink:0;color:var(--warn,#d1832b)}
+.card-conflict .more{color:var(--brand-dark);font-weight:600;white-space:nowrap}
+.card-conflict:hover .more{text-decoration:underline}
+.card-conflict:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px;border-radius:4px}
+
 /* ── Divider ── */
 .div{height:1px;background:var(--border);margin:14px 0}
 
@@ -381,15 +404,22 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 /* ── Detail view ── */
 .view{display:none}
 .view.on{display:block}
-.back{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);background:none;border:none;padding:0;cursor:pointer;margin-bottom:16px}
-.back:hover{color:var(--text)}
+.back{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:var(--text-2);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 12px 6px 9px;cursor:pointer;margin-bottom:16px;transition:border-color 120ms,color 120ms,background 120ms}
+.back:hover{color:var(--text);border-color:var(--border-strong);background:var(--surface-2)}
+.back:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
+.back svg{flex-shrink:0;opacity:.9}
 .detail-title{font-size:17px;font-weight:700;margin-bottom:4px}
 .detail-desc{font-size:13px;color:var(--text-2);line-height:1.55;margin-bottom:16px}
 .info-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px}
 .info-box.conflict{border-color:oklch(70% 0.14 70 / .5);background:oklch(70% 0.14 70 / .08)}
 .conflict-text{font-size:12px;color:var(--text-2);line-height:1.55}
-.conflict-steps{font-size:12px;color:var(--text-2);line-height:1.55;margin:8px 0 0;padding-left:18px}
-.conflict-steps li{margin:2px 0}
+.conflict-actions{display:flex;flex-direction:column;gap:9px;margin-top:11px}
+.conflict-step{display:flex;align-items:center;gap:9px}
+.conflict-step .num{flex-shrink:0;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--warn);color:var(--warn);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
+.conflict-step .lbl{flex:1;font-size:12px;color:var(--text-2);line-height:1.4}
+.conflict-act{flex-shrink:0;font-size:11.5px;font-weight:600;color:var(--brand-dark);background:none;border:1px solid var(--border-strong);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;transition:background 100ms}
+.conflict-act:hover{background:var(--surface-2)}
+.conflict-act:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
 .file-why{font-size:11px;color:var(--text-3);line-height:1.5;margin:3px 0 2px}
 .meta-line{text-align:center;font-size:10px;color:var(--text-3);margin-top:16px;opacity:.75}
 .meta-link{font-size:10px;color:var(--text-3);background:none;border:none;padding:0;cursor:pointer;text-decoration:underline;text-decoration-color:transparent;transition:text-decoration-color 100ms}
@@ -732,11 +762,20 @@ function render() {
   const sub1 = el('div', 'sect-sub'); sub1.textContent = 'One active surface at a time';
   panel.append(sect1, sub1);
 
+  const group = el('div', 'radiogroup');
+  group.setAttribute('role', 'radiogroup');
+  group.setAttribute('aria-label', 'Ad placement in Visual Studio Code');
   const ids = ['status-bar', 'thinking-line', 'chat-banner'];
+  let conflictShown = false;
   for (const id of ids) {
     const sv = (state.vsSurfaces || []).find(s => s.id === id) || { id, active:false, available:false, consentGranted:false, comingSoon:true, modifiesFiles:false };
-    panel.append(buildCard(sv));
+    // The webview surfaces share one Claude Code patch, so a conflict is a single shared problem with
+    // a single fix - show the hint on the first conflicted card only, never once per surface.
+    const showConflict = !!sv.conflict && !conflictShown;
+    if (showConflict) conflictShown = true;
+    group.append(buildCard(sv, showConflict));
   }
+  panel.append(group);
 
   // Terminal
   const div1 = el('div', 'div');
@@ -796,7 +835,7 @@ function buildPrivacyStrip() {
 // every row here is enforced by the egress-whitelist test in @awaitful/shared.
 function buildPrivacyView() {
   const panel = el('div', 'panel');
-  const back = el('button', 'back'); back.textContent = '← Back'; back.onclick = () => { state._view = 'surfaces'; render(); };
+  const back = backButton();
   panel.append(back);
 
   const title = el('div', 'detail-title'); title.textContent = 'What leaves your machine';
@@ -847,13 +886,24 @@ function buildPrivacyView() {
   return panel;
 }
 
-// Earning-rate chip — value comes from the server's live rate card, never
-// hardcoded here. Hidden until the rate card has been fetched.
-function rateChip(rate) {
+// Earning chip — value comes from the server's live rate card, never hardcoded here. Hidden until the
+// rate card has been fetched. The label says "earnings" so a new user reads it as money, not speed: the
+// status bar is "Base earnings", others are "N× earnings", and the additive terminal is "+N× earnings".
+// Always anchored to the base (status-bar) rate, so the number never shifts when the user switches.
+function rateChip(rate, additive) {
   if (rate === undefined || rate === null) return null;
-  const chip = el('span', rate === 1 ? 'rate base' : 'rate');
-  chip.textContent = rate === 1 ? '1× base rate' : '≈' + rate + '× earnings';
-  chip.title = 'Verified views here earn about ' + rate + '× the status-bar rate. Set by the live rate card and may change over time.';
+  const base = rate === 1 && !additive;
+  const chip = el('span', base ? 'rate base' : 'rate');
+  chip.textContent = additive
+    ? '+' + rate + '× earnings'
+    : base
+      ? 'Base earnings'
+      : rate + '× earnings';
+  chip.title = additive
+    ? 'Runs alongside your VS Code placement and earns about ' + rate + '× the base rate on top of it.'
+    : base
+      ? 'The baseline earnings - every other placement earns a multiple of this.'
+      : 'Earns about ' + rate + '× what the status bar earns. Set by the live rate card, and can change over time.';
   return chip;
 }
 
@@ -866,18 +916,50 @@ function lockGlyph() {
   return lock;
 }
 
-function buildCard(sv) {
+function buildCard(sv, showConflict) {
   const m = META[sv.id] || {};
   const locked = !state.signedIn && !sv.comingSoon;
+  const active = sv.active && !locked;
+  const conflict = !!showConflict && !locked;
   const card = el('div', 'card');
-  if (sv.active && !locked) card.classList.add('active');
+  if (active) card.classList.add('active');
   if (sv.comingSoon) card.classList.add('soon');
-  if (locked) {
-    card.classList.add('locked');
-    card.title = 'Sign in to activate';
-    card.onclick = () => send('sign-in');
-  } else if (!sv.active && !sv.comingSoon) {
-    card.onclick = () => handleEnable(sv);
+  if (locked) { card.classList.add('locked'); card.title = 'Sign in to activate'; }
+
+  // Each of the three VS Code surfaces is a radio inside the pick-one radiogroup (the card is the
+  // radio). Selecting one switches away from the others; status-bar activates directly, a webview
+  // surface opens its detail page (consent, or the fix when a competitor changed Claude Code).
+  card.setAttribute('role', 'radio');
+  card.setAttribute('aria-checked', active ? 'true' : 'false');
+  if (sv.comingSoon) card.setAttribute('aria-disabled', 'true');
+  // An explicit name, so the radio announces as "<surface>, <rate>" instead of the concatenation of
+  // every descendant text (which would sweep in the description and the inner Learn more / Fix it buttons).
+  const ratePhrase = sv.earnRate === 1 ? 'base earning rate' : sv.earnRate ? 'about ' + sv.earnRate + ' times the base rate' : '';
+  card.setAttribute('aria-label', (m.label || sv.id) + (ratePhrase ? ', ' + ratePhrase : ''));
+  const choose = () => {
+    if (locked) { send('sign-in'); return; }
+    if (sv.comingSoon || sv.active) return;
+    handleEnable(sv);
+  };
+  if (!sv.comingSoon) {
+    // Every selectable radio is focusable, INCLUDING the checked one, so a keyboard/screen-reader user
+    // can land on the current selection and hear "checked". Arrow keys roam focus within the group.
+    card.tabIndex = 0;
+    card.onclick = choose;
+    card.onkeydown = (e) => {
+      // Only the card's OWN keys act. Enter/Space bubbling up from the inner buttons (Learn more,
+      // Fix it) must NOT be hijacked into a surface switch - let their native activation run.
+      if (e.target !== card) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const dir = (e.key === 'ArrowDown' || e.key === 'ArrowRight') ? 1 : -1;
+        const radios = card.parentElement ? Array.prototype.slice.call(card.parentElement.querySelectorAll('.card')) : [];
+        for (let i = radios.indexOf(card) + dir; i >= 0 && i < radios.length; i += dir) {
+          if (radios[i] && radios[i].tabIndex === 0) { radios[i].focus(); break; }
+        }
+      }
+    };
   }
 
   // Highlight illustration on hover
@@ -899,17 +981,27 @@ function buildCard(sv) {
     const tag = el('span', 'tag-mod');
     tag.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" opacity=".6"/><path d="M14 1H2a1 1 0 00-1 1v12a1 1 0 001 1h12a1 1 0 001-1V2a1 1 0 00-1-1z" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".4"/></svg> Modifies Claude Code';
     meta.append(tag);
-    if (!locked) {
-      const learn = el('button', 'btn-learn'); learn.textContent = 'Learn more →';
-      learn.onclick = (e) => { e.stopPropagation(); openDetail(sv.id); };
-      meta.append(learn);
-    }
   } else {
-    const tag = el('span', 'tag-safe');
-    tag.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z"/></svg> Does not modify Claude Code';
-    meta.append(tag);
+    meta.append(safeTag('Does not modify Claude Code'));
+  }
+  if (!locked) {
+    const learn = el('button', 'btn-learn'); learn.textContent = 'Learn more →';
+    learn.onclick = (e) => { e.stopPropagation(); openDetail(sv.id); };
+    meta.append(learn);
   }
   body.append(meta);
+
+  // Conflict hint: a competitor changed Claude Code, so this surface needs a clean copy first.
+  // Surfaced on the card so the block is visible without opening the detail page; the fix lives there.
+  if (conflict) {
+    const who = sv.conflictVendor || 'another extension';
+    const cf = el('button', 'card-conflict');
+    cf.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6 15 14H1L8 1.6z"/><path d="M8 6.4v3.1M8 11.6h.01"/></svg>';
+    cf.appendChild(text('Changed by ' + who + ', needs a clean copy. '));
+    const more = el('span', 'more'); more.textContent = 'Fix it →'; cf.appendChild(more);
+    cf.onclick = (e) => { e.stopPropagation(); openDetail(sv.id); };
+    body.append(cf);
+  }
 
   const action = el('div', 'card-action');
   if (sv.comingSoon) {
@@ -918,24 +1010,10 @@ function buildCard(sv) {
   } else if (locked) {
     action.append(lockGlyph());
   } else {
-    // iOS-style switch. The three VS Code surfaces are mutually exclusive (exactly one active),
-    // so turning one on switches away from the others; turning off a webview surface reverts to
-    // the status-bar default (the always-on floor, which can't itself be turned off).
-    const toggle = el('button', 'toggle');
-    if (sv.active) toggle.classList.add('on');
-    toggle.setAttribute('role', 'switch');
-    toggle.setAttribute('aria-checked', sv.active ? 'true' : 'false');
-    toggle.setAttribute('aria-label', m.label || sv.id);
-    if (sv.active && sv.provisional) toggle.title = 'Running on a new Claude Code version - confirming it automatically. You are earning normally.';
-    toggle.onclick = (e) => {
-      e.stopPropagation();
-      if (sv.active) {
-        if (sv.id !== 'status-bar') send('set-surface', { id: 'status-bar' }); // revert to the default
-      } else {
-        handleEnable(sv); // activate (status-bar: direct; webview: opens the consent/detail page)
-      }
-    };
-    action.append(toggle);
+    // Radio dot: filled + ringed when this surface is the current pick.
+    const radio = el('span', 'radio');
+    if (active && sv.provisional) card.title = 'Running on a new Claude Code version - confirming it automatically. You are earning normally.';
+    action.append(radio);
   }
 
   card.append(icon, body, action);
@@ -962,11 +1040,9 @@ function buildTerminalCard() {
   const nameRow = el('div', 'card-name-row');
   const name = el('div', 'card-name'); name.textContent = m.label;
   nameRow.append(name);
-  const chip = rateChip(state.terminalEarnRate);
-  if (chip) {
-    chip.title = 'Runs alongside your VS Code surface - these earnings stack on top. ' + chip.title;
-    nameRow.append(chip);
-  }
+  // Additive: the '+' prefix + the independent switch (vs the radios above) say it stacks, not replaces.
+  const chip = rateChip(state.terminalEarnRate, true);
+  if (chip) nameRow.append(chip);
   const desc = el('div', 'card-desc'); desc.textContent = m.desc;
   const meta = el('div', 'card-meta');
   const tag = el('span', 'tag-mod'); tag.textContent = '⚙ Modifies settings.json';
@@ -1004,18 +1080,86 @@ function buildTerminalCard() {
   return card;
 }
 
+// The detail illustration, shared by every detail page (injected once, so the big SVG is not
+// duplicated across pages - keeps the panel small). Callers highlight their own surface after.
+function illusWrap() {
+  const iw = el('div', 'illus-wrap');
+  iw.innerHTML = ${JSON.stringify(ILLUSTRATION)};
+  return iw;
+}
+
+// The "does not touch your files" checkmark tag, shared by the card and the status-bar page.
+function safeTag(label) {
+  const tag = el('span', 'tag-safe');
+  tag.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z"/></svg> ';
+  tag.appendChild(document.createTextNode(label));
+  return tag;
+}
+
+// The Back control shared by every detail and sub-page - one definition so the chevron, label, target,
+// and styling can never drift between pages. Returns to the settings (placements) view.
+function backButton() {
+  const b = el('button', 'back');
+  b.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.25 5.25 8 10 12.75"/></svg>';
+  b.appendChild(text('Back'));
+  b.setAttribute('aria-label', 'Back to settings');
+  b.onclick = () => { state._view = 'surfaces'; render(); };
+  return b;
+}
+
+// Status bar modifies nothing, so its detail page is deliberately simpler than the patch surfaces':
+// the shared illustration (highlighting the status bar), what it is, a one-tap activate, and a plain
+// "No file changes" reassurance. No consent gate, no file disclosure, no restore/reload.
+function buildStatusBarDetail() {
+  const m = META['status-bar'];
+  const sv = (state.vsSurfaces || []).find(s => s.id === 'status-bar') || {};
+  const panel = el('div', 'panel');
+
+  const back = backButton();
+  panel.append(back);
+
+  panel.append(illusWrap());
+  setTimeout(() => updateHighlight('status-bar'), 0);
+
+  const titleRow = el('div', 'card-name-row');
+  const title = el('div', 'detail-title'); title.textContent = m.label;
+  titleRow.append(title);
+  const chip = rateChip(sv.earnRate);
+  if (chip) titleRow.append(chip);
+  const desc = el('div', 'detail-desc'); desc.textContent = m.desc;
+  panel.append(titleRow, desc);
+
+  const footer = el('div', 'detail-footer');
+  const left = el('div', 'detail-footer-l');
+  left.append(safeTag('No file changes'));
+  const right = el('div', 'detail-footer-r');
+  const cancel = el('button', 'btn-ghost'); cancel.textContent = 'Cancel'; cancel.onclick = () => { state._view = 'surfaces'; render(); };
+  right.append(cancel);
+  const enableBtn = el('button', 'btn-primary');
+  if (sv.active) {
+    enableBtn.textContent = 'Showing in status bar';
+    enableBtn.disabled = true;
+  } else {
+    enableBtn.textContent = 'Show in status bar';
+    enableBtn.onclick = () => { send('set-surface', { id: 'status-bar' }); state._view = 'surfaces'; render(); };
+  }
+  right.append(enableBtn);
+  footer.append(left, right);
+  panel.append(footer);
+  return panel;
+}
+
 function buildDetailView(id) {
+  if (id === 'status-bar') return buildStatusBarDetail();
   const isVS = META[id];
   const termMeta = { label: 'Terminal status line', desc: 'Adds a status line to Claude Code (~/.claude/settings.json) that shows a single sponsored line while the agent is thinking, then hands back to your own status line the instant it finishes. Your existing status line is preserved and restored. Works in any terminal - VS Code’s or external - and earns alongside your VS Code surface.', files: [{ path: '~/.claude/settings.json', why: 'Adds a statusLine entry pointing at Awaitful’s script. Your existing status line is backed up and restored when you turn this off.' }], ghPath: 'src/hooks/statusLineScript.ts' };
   const m = isVS ? META[id] : (id === 'terminal' ? termMeta : {});
 
   const panel = el('div', 'panel');
-  const back = el('button', 'back'); back.textContent = '← Back'; back.onclick = () => { state._view = 'surfaces'; render(); };
+  const back = backButton();
   panel.append(back);
 
-  const iw = el('div', 'illus-wrap');
-  iw.innerHTML = ${JSON.stringify(ILLUSTRATION)};
-  panel.append(iw);
+  panel.append(illusWrap());
   // Highlight the surface in the detail illustration
   setTimeout(() => updateHighlight(id), 0);
 
@@ -1025,7 +1169,8 @@ function buildDetailView(id) {
   const detailRate = id === 'terminal'
     ? state.terminalEarnRate
     : ((state.vsSurfaces || []).find(s => s.id === id) || {}).earnRate;
-  const detailChip = rateChip(detailRate);
+  // The terminal is additive, so its chip reads "+N×" here exactly as on its card (never a bare "N×").
+  const detailChip = rateChip(detailRate, id === 'terminal');
   if (detailChip) titleRow.append(detailChip);
   const desc = el('div', 'detail-desc'); desc.textContent = m.desc || '';
   panel.append(titleRow, desc);
@@ -1133,16 +1278,28 @@ function buildDetailView(id) {
         cp.textContent = who + ' has modified Claude Code. Awaitful can restore the genuine original file, verified byte-for-byte against the known-good version, then apply its own. Click below to do that.' + (svDetail.conflictVendor ? ' Afterwards, disable ' + svDetail.conflictVendor + ' so the two do not change the same file.' : '');
         box.append(cp);
       } else {
+        const whoLow = svDetail.conflictVendor ? svDetail.conflictVendor : 'the other extension';
         const lead = el('div', 'conflict-text');
-        lead.textContent = who + ' has changed Claude Code’s files. Disabling it stops further changes but does not undo the ones already saved to disk, so Awaitful leaves the files alone. To restore Claude Code’s originals:';
-        const steps = el('ol', 'conflict-steps');
-        [
-          'Disable ' + who + ' so it stops changing the files. You can leave it installed.',
-          'Uninstall Claude Code, then reload this window so its files are fully removed.',
-          'Install Claude Code again. This restores its original files.',
-          'Open Awaitful settings and enable ' + (m.label || id) + '.',
-        ].forEach(t => { const li = el('li'); li.textContent = t; steps.append(li); });
-        box.append(lead, steps);
+        lead.textContent = who + ' changed Claude Code’s files, and Awaitful has no verified-clean copy to restore. Disabling ' + whoLow + ' stops new changes but will not undo what is already on disk, so the clean fix is to reinstall Claude Code, then turn on ' + (m.label || id) + ' here.';
+        box.append(lead);
+        // Actionable steps: each opens the exact VS Code view instead of describing where to click.
+        const actions = el('div', 'conflict-actions');
+        const step = (n, label, btnText, onClick) => {
+          const row = el('div', 'conflict-step');
+          const num = el('span', 'num'); num.textContent = n;
+          const lbl = el('span', 'lbl'); lbl.textContent = label;
+          row.append(num, lbl);
+          if (btnText) { const b = el('button', 'conflict-act'); b.textContent = btnText; b.onclick = onClick; row.append(b); }
+          actions.append(row);
+        };
+        step('1', 'Turn off ' + whoLow + ' so it stops changing the files.',
+          svDetail.conflictVendor ? 'Manage ' + who + ' →' : 'Open extensions →',
+          () => send('open-extensions', { query: svDetail.conflictVendor || '@installed' }));
+        step('2', 'Reinstall Claude Code to restore its original files.',
+          'Open Claude Code →', () => send('open-extensions', { query: 'Claude Code' }));
+        step('3', 'Reload this window, then turn on ' + (m.label || id) + ' here.',
+          'Reload window', () => send('reload-window'));
+        box.append(actions);
       }
       panel.append(box);
     }
@@ -1309,7 +1466,7 @@ const SAMPLE_LINE = 'Awaitful: Get paid awaiting your AI thinking!';
 
 function buildAdView() {
   const panel = el('div', 'panel');
-  const back = el('button', 'back'); back.textContent = '← Back'; back.onclick = () => { state._view = 'surfaces'; render(); };
+  const back = backButton();
   panel.append(back);
 
   const title = el('div', 'detail-title'); title.textContent = 'Customize ad';

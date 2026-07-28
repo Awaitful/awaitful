@@ -52,7 +52,10 @@ export interface PatchRecipe {
 // v20: bumped for the Awaitful rename (the shim body changed — the host↔shim discovery key is now
 // `awaitful`). Future shim changes bump this so an already-Awaitful-patched editor re-patches; a
 // pre-rename CodeCue patch is handled as a foreign modification, not by staleness (see engine.ts).
-export const SHIM_VERSION = 24;
+// v25: hover link cue (underline + trailing arrow on hover, not at rest), a width-gated timer, a
+// fade-in on first appearance, and the new default 'signal' glow theme - all become PATCHED BYTES,
+// so the bump makes already-patched editors re-apply.
+export const SHIM_VERSION = 25;
 export const MARKER_PREFIX = '/* AWAITFUL-START';
 export const MARKER_START = `${MARKER_PREFIX} v${SHIM_VERSION} */`;
 export const MARKER_END = '/* AWAITFUL-END */';
@@ -99,6 +102,10 @@ export interface GlowTheme {
   animation: string;
 }
 export const GLOW_THEMES: readonly GlowTheme[] = [
+  // Awaitful's own: signal-green sweeping through the brand's ground green. The default, so a fresh
+  // install glows on-brand. Brand hex lives ONLY here (single source), like every other theme.
+  { id: 'signal', label: 'Signal', swatch: 'linear-gradient(90deg,#163300,#4ade80,#9fe870)',
+    background: 'conic-gradient(from var(--cc-a),#9fe870,#4ade80,#163300,#4ade80,#9fe870)', animation: 'cc-spin 5s linear infinite' },
   { id: 'aurora', label: 'Aurora', swatch: 'linear-gradient(90deg,#38bdf8,#818cf8,#c084fc)',
     background: 'conic-gradient(from var(--cc-a),#38bdf8,#818cf8,#c084fc,#38bdf8)', animation: 'cc-spin 5s linear infinite' },
   { id: 'comet', label: 'Comet', swatch: 'linear-gradient(90deg,#0b1220,#7dd3fc,#e0f2fe)',
@@ -112,7 +119,7 @@ export const GLOW_THEMES: readonly GlowTheme[] = [
   { id: 'ember', label: 'Ember', swatch: 'linear-gradient(90deg,#ff6a00,#ff2d55,#ffb347)',
     background: 'conic-gradient(from var(--cc-a),#ff6a00,#ff2d55,#ffb347,#ff6a00)', animation: 'cc-spin 5s linear infinite' },
 ];
-export const DEFAULT_GLOW_THEME = 'aurora';
+export const DEFAULT_GLOW_THEME = 'signal';
 
 /** The outline frame: how far the glow extends. Orthogonal to the colour theme. */
 export interface BannerFrame { id: string; label: string; }
@@ -194,9 +201,14 @@ const THINKING_SHIM = String.raw`
     // DOCK_GAP is NEGATIVE: the banner overlaps the composer's top edge by a few px so its opaque
     // background covers the hairline seam (otherwise the page background shows through when scrolled).
     var PORT_BASE = 51789, PORT_SPAN = 12, DOCK_GAP = -3;
+    // Below this row/composer width, the elapsed timer is hidden so it can't crowd the ad text.
+    var TIMER_MIN = 260;
 
     var origin = null, current = null, overlay = null, faceEl = null, glowEl = null;
-    var iconEl = null, textEl = null, timerEl = null, lastEl = null, spinEl = null;
+    var iconEl = null, textEl = null, timerEl = null, arrowEl = null, lastEl = null, spinEl = null;
+    // Fade-in is disabled under reduced motion; read once (cheap, stable for the session). Distinct
+    // from REDUCED_MOTION below, which is the CSS rule that freezes the glow.
+    var RM = false; try { RM = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); } catch (e) {}
     var simStart = 0, lastBeacon = 0, lastLive = 0, askAt = 0, fetching = false, fetchingSince = 0;
     var rectKey = "", styleAt = 0, fontVal = "", bgVal = "", timerText = "", spinText = "", builtSig = "", glowKey = "", contentOffset = 0;
     var cssEl = null, cssText = "";
@@ -327,7 +339,7 @@ const THINKING_SHIM = String.raw`
     // @property (CFG.themeKeyframes) are injected once by setCss. reduced-motion freezes to a static
     // border. Adding a theme is one GLOW_THEMES entry; nothing changes in the shim body.
     var THEMES = (CFG && CFG.themes) || {};
-    function themeOf(id) { return THEMES[id] || THEMES.aurora || { background: "", animation: "" }; }
+    function themeOf(id) { return THEMES[id] || THEMES.signal || { background: "", animation: "" }; }
     var GLOW_KF = (CFG && CFG.themeKeyframes) || "";
     var REDUCED_MOTION = "@media (prefers-reduced-motion:reduce){[data-cc-glow]{animation:none!important}}";
 
@@ -361,6 +373,8 @@ const THINKING_SHIM = String.raw`
       overlay.style.cssText =
         "position:fixed;z-index:2147483000;pointer-events:auto;display:none;visibility:hidden;box-sizing:border-box;";
       overlay.addEventListener("click", onClick, false);
+      overlay.addEventListener("pointerenter", onHover, false);
+      overlay.addEventListener("pointerleave", onUnhover, false);
       (document.body || document.documentElement).appendChild(overlay);
       builtSig = ""; iconEl = textEl = timerEl = faceEl = glowEl = null;
       return overlay;
@@ -400,10 +414,23 @@ const THINKING_SHIM = String.raw`
       // underline marks it as the clickable link it is.
       textEl = document.createElement("span");
       textEl.setAttribute("data-cc-text", "1");
+      // No underline at rest - it appears on hover (see the overlay's hover handlers), so the line
+      // reads as a link only when you point at it and never spends the ad's prime space on chrome.
       textEl.style.cssText =
-        "min-width:0;overflow:hidden;text-overflow:ellipsis;text-decoration:underline;color:var(--vscode-foreground, currentColor);";
+        "min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--vscode-foreground, currentColor);";
       textEl.textContent = c.line || "";
       parent.appendChild(textEl);
+      // Trailing "opens the link" cue: zero-width and hidden at rest, revealed on hover for a clickable
+      // ad only. Its space collapses when hidden, so it never shortens the ad text.
+      arrowEl = null;
+      if (c.url) {
+        arrowEl = document.createElement("span");
+        arrowEl.setAttribute("data-cc-arrow", "1");
+        arrowEl.setAttribute("aria-hidden", "true");
+        arrowEl.textContent = " ↗";
+        arrowEl.style.cssText = "flex:0 0 auto;opacity:0;max-width:0;overflow:hidden;white-space:nowrap;transition:opacity 120ms ease,max-width 120ms ease;color:var(--vscode-foreground, currentColor);";
+        parent.appendChild(arrowEl);
+      }
       // Elapsed timer — the tasteful "still thinking, sponsored" tell. Right-pinned, dim,
       // tabular so digits don't jitter. Updated in the rAF loop.
       if (SHOW_TIMER) {
@@ -544,7 +571,9 @@ const THINKING_SHIM = String.raw`
           // Cover at least the rest of the row (so no original verb/timer peeks past a short
           // ad), grow to fit a longer ad, but never past the viewport edge (then ellipsize).
           ov.style.minWidth = Math.max(0, r.right - left) + "px";
-          ov.style.maxWidth = Math.max(120, vw - left - 24) + "px";
+          var avail = Math.max(120, vw - left - 24);
+          ov.style.maxWidth = avail + "px";
+          if (timerEl) timerEl.style.display = (avail < TIMER_MIN) ? "none" : "";  // don't let it crowd the text
           ov.style.display = "flex";
           ov.style.visibility = "visible";
         }
@@ -576,6 +605,7 @@ const THINKING_SHIM = String.raw`
           ov.style.top = top + "px";
           ov.style.width = width + "px";
           ov.style.maxWidth = ""; ov.style.minWidth = ""; ov.style.height = "";  // clear any line-mode geometry
+          if (timerEl) timerEl.style.display = (width < TIMER_MIN) ? "none" : "";  // don't let it crowd the text
           ov.style.display = "block";
           ov.style.visibility = "visible";
         }
@@ -607,10 +637,17 @@ const THINKING_SHIM = String.raw`
     }
 
     function onClick() { if (current) post("/surface/click", { adId: current.adId, slateId: current.slateId }); }
+    // Hover cue: underline the line + reveal the trailing arrow, only for a clickable ad. Toggling
+    // inline styles on our own elements - never CC's - keeps it fail-safe and React-safe.
+    function onHover() { try { if (!current || !current.url) return; if (textEl) textEl.style.textDecoration = "underline"; if (arrowEl) { arrowEl.style.opacity = "1"; arrowEl.style.maxWidth = "1.6em"; } } catch (e) {} }
+    function onUnhover() { try { if (textEl) textEl.style.textDecoration = "none"; if (arrowEl) { arrowEl.style.opacity = "0"; arrowEl.style.maxWidth = "0"; } } catch (e) {} }
 
     function anchorFor(c) { return (c && c.placement === "chat-banner") ? findComposer() : findSpinner(); }
 
     function show(c) {
+      // Was the overlay off-screen before this? Then this is a fresh appearance and should fade in;
+      // a content swap mid-session (rotation) must NOT re-fade. Read before ensureOverlay/reposition.
+      var wasHidden = !overlay || overlay.style.display === "none" || overlay.style.visibility === "hidden";
       ensureOverlay();
       build(c);
       var anchor = anchorFor(c);
@@ -619,6 +656,15 @@ const THINKING_SHIM = String.raw`
       overlay.style.cursor = c.url ? "pointer" : "default";
       overlay.title = c.unpaid ? "House message · bills nobody, pays nothing - Awaitful" : "Sponsored · Awaitful";
       reposition(anchor);
+      // Fade in on a fresh appearance only, never under reduced motion. Opacity ONLY - position keeps
+      // tracking instantly (no transition on left/top), and billing is unaffected (purely visual).
+      if (wasHidden && !RM) {
+        overlay.style.transition = "opacity 150ms ease";
+        overlay.style.opacity = "0";
+        try { requestAnimationFrame(function () { if (overlay) overlay.style.opacity = "1"; }); } catch (e) { overlay.style.opacity = "1"; }
+      } else {
+        overlay.style.transition = ""; overlay.style.opacity = "1";
+      }
       // Hand off: hide CC's spinner ONLY now that our banner is placed (never before).
       if (c.placement === "chat-banner") setCss(hideRule() + GLOW_KF + REDUCED_MOTION);
       dbg.overlay = true;

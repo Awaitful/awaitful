@@ -9,7 +9,20 @@ const { spawnSync } = require('node:child_process');
  */
 const EXTENSION_ID = 'awaitful.awaitful';
 
-const INSTALL_ARGS = ['--install-extension', EXTENSION_ID];
+/**
+ * `--force` is not optional, and leaving it off was a real bug.
+ *
+ * Without it, `--install-extension` REFUSES to touch an editor that already has any version of the
+ * extension: it prints "v0.7.1 is already installed", exits 0, and installs nothing. So `npx
+ * awaitful` silently did nothing for every existing user - the one group most likely to run it to
+ * pick up a new release - while reporting success. It only ever worked on a machine that did not
+ * have Awaitful at all.
+ *
+ * With `--force` the editor resolves the id against its marketplace and installs the latest, whether
+ * that is a first install or an upgrade. Re-running when already current just reinstalls the same
+ * version, which is harmless and keeps the command honestly idempotent.
+ */
+const INSTALL_ARGS = ['--install-extension', EXTENSION_ID, '--force'];
 
 /**
  * Decide which detected editors to install into. Pure - the caller owns all messaging - and the

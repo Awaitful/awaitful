@@ -19,14 +19,17 @@ That is the whole of it. What crosses the network is a device token plus coarse,
 
 ## Surfaces
 
-Awaitful can present its one line wherever fits your setup:
+Awaitful can present its one line wherever fits your setup. You pick one in the panel, and the same account and earnings follow you across all of them.
 
-- The VS Code status bar
-- The agent's thinking line
-- A banner above the composer
-- The terminal status line
+![Status bar: a single sponsored line at the right end of the VS Code status bar](https://awaitful.com/extension/surface-status-bar.png)
 
-The same account and earnings follow you across all of them, and the extension fails safe: if it cannot place a line cleanly, it simply shows nothing.
+![Thinking-line: the sponsored line shown in place of the agent's thinking spinner](https://awaitful.com/extension/surface-thinking-line.png)
+
+![Chat banner: a sponsored banner docked above the composer while the agent thinks](https://awaitful.com/extension/surface-chat-banner.png)
+
+![Terminal status line: a sponsored line in the terminal while the agent thinks](https://awaitful.com/extension/surface-terminal.png)
+
+The extension fails safe: if it cannot place a line cleanly, it simply shows nothing.
 
 ## Getting started
 

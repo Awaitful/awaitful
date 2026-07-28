@@ -4,6 +4,21 @@ export const DEFAULTS = {
   stuckSessionSeconds: 5,
   clickMultiplier: 50,
   minPollSeconds: 3,
+  // Per-ACCOUNT fraud caps on a developer's daily earnings, summed across all their devices (a
+  // complement to the per-device rate-card caps). Beyond the daily cap, the developer stops earning
+  // for the UTC day but the advertiser is still billed (as unlinked) - excess dropped, never a free
+  // impression. Cross the ceiling and the account auto-freezes for review (still accrues nothing,
+  // cannot withdraw). Deliberate round numbers, tunable; a real number a developer can hit honestly
+  // sits well below the ceiling a fraud ring would race toward.
+  accountDailyCapUsd: 25,
+  accountDailyCeilingUsd: 100,
+  // The two-tier withdrawal minimum: a developer's FIRST payout unlocks at firstPayoutMinUsd (the cheap
+  // early trust win), every one after at minPayoutUsd. Admin-tunable at runtime (PlatformConfig); this
+  // is the shipped default AND the single number the landing/docs advertise, so a policy change here
+  // propagates to the marketing copy and the server fallback together (a runtime admin override is
+  // operational - the logged-in earnings page shows the live per-developer threshold).
+  firstPayoutMinUsd: 5,
+  minPayoutUsd: 10,
 } as const;
 
 export type Defaults = typeof DEFAULTS;
@@ -80,6 +95,15 @@ export const LINKS = {
   npxInstall: 'npx awaitful',
   npmPackage: 'https://www.npmjs.com/package/awaitful',
 
+  /** Live uptime, independently hosted (BetterStack) - a receipt nobody has to take our word for. */
+  statusPage: 'https://status.awaitful.com',
+
+  /**
+   * A live third-party scan of this site's security headers. The grade is never printed in copy -
+   * it would drift like a version number; the link IS the grade, whatever it is today.
+   */
+  securityScan: 'https://securityheaders.com/?q=https%3A%2F%2Fawaitful.com',
+
   /**
    * Protocol deep links: clicked in a browser, the OS hands them to the editor, which opens the
    * extension's install page directly - no marketplace hop. Each scheme was verified by hand
@@ -91,6 +115,25 @@ export const LINKS = {
   devinDeepLink: 'devin:extension/awaitful.awaitful',
   vscodiumDeepLink: 'vscodium:extension/awaitful.awaitful',
 } as const;
+
+/**
+ * The brand's social profiles, in footer display order. Kept as plain data (id + label + href) so
+ * this package stays UI-free; the web maps each id to its icon. Handles are written to match each
+ * platform's real URL: Instagram and Threads lowercase them (so `getawaitful`, not `getAwaitful`),
+ * and Threads runs off the same handle as Instagram. A separate export from LINKS on purpose - these
+ * are a render list, not the trust-receipt map the links test pins.
+ */
+export const SOCIAL = [
+  { id: 'x', label: 'X', href: 'https://x.com/Awaitful' },
+  { id: 'bluesky', label: 'Bluesky', href: 'https://bsky.app/profile/awaitful.com' },
+  { id: 'youtube', label: 'YouTube', href: 'https://www.youtube.com/@awaitful' },
+  { id: 'reddit', label: 'Reddit', href: 'https://www.reddit.com/r/Awaitful' },
+  { id: 'instagram', label: 'Instagram', href: 'https://www.instagram.com/getawaitful' },
+  { id: 'threads', label: 'Threads', href: 'https://www.threads.net/@getawaitful' },
+  { id: 'facebook', label: 'Facebook', href: 'https://www.facebook.com/Awaitful' },
+] as const;
+
+export type SocialId = (typeof SOCIAL)[number]['id'];
 
 export const ERROR_CODES = {
   INVALID_EVENT_ID: 'INVALID_EVENT_ID',

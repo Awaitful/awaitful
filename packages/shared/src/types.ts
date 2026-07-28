@@ -115,7 +115,7 @@ export interface PlacementContext {
   report(event: Pick<AdEvent, 'type' | 'adId' | 'slateId' | 'visibleMs'>): void;
 }
 
-export type SSEEventType = 'slate_refresh' | 'killswitch' | 'recipe_update' | 'impression_stats';
+export type SSEEventType = 'slate_refresh' | 'killswitch' | 'recipe_update' | 'impression_stats' | 'market_event';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -235,6 +235,15 @@ export interface EarningsSummary {
   streakDays: number;
   byPlacement: EarningsByPlacement[];
   recent: EarningEntry[];
+  /**
+   * The per-account daily earning cap and today's position against it (FINANCE.md §6). A published,
+   * deterministic cap is a RULE, not silent confiscation - so the developer sees it. Beyond the cap
+   * the day's further views stop earning (the advertiser is still billed).
+   */
+  dailyCapUsd: string;
+  dailyEarnedUsd: string;
+  /** True when the account is under review and cannot withdraw (still accrues). Surfaced with a reason. */
+  frozen: boolean;
 }
 
 export interface EarningsChartPoint {
@@ -283,6 +292,8 @@ export interface CampaignWithCreative {
   status: CampaignStatus;
   bidCpm: string;
   dailyBudget: string;
+  /** Optional lifetime cap. `null` means no cap - the ad paces daily until the wallet runs out. */
+  totalBudget: string | null;
   spent: string;
   createdAt: string;
   creative: CampaignCreative | null;
@@ -302,6 +313,8 @@ export interface CreateCampaignInput {
   brandIconData?: string;
   bidCpm: number;
   dailyBudget: number;
+  /** Optional lifetime cap. Omit for no cap. */
+  totalBudget?: number;
 }
 
 export interface UpdateCampaignInput {
@@ -313,6 +326,8 @@ export interface UpdateCampaignInput {
   brandIconData?: string | null;
   bidCpm?: number;
   dailyBudget?: number;
+  /** `null` clears the cap back to "no cap". */
+  totalBudget?: number | null;
   status?: 'paused' | 'draft' | 'live';
 }
 
@@ -338,9 +353,14 @@ export interface PayoutOption {
   providerId: string;
   displayName: string;
   grossUsd: string;
-  feeUsd: string;
-  platformFeeUsd: string;
+  /** What the developer actually receives. Equals grossUsd when the platform absorbs the provider fee. */
   netUsd: string;
+  /** The provider's per-payout fee. Shown for transparency; NOT deducted from the developer when the
+   *  platform bears it. */
+  feeUsd: string;
+  /** Who pays that fee: 'platform' (Awaitful absorbs it, developer gets the full amount) or 'developer'
+   *  (netted from the payout). Stripe is platform-borne today; the field lets a future rail differ. */
+  feeBearer: 'platform' | 'developer';
   feeDescription: string;
   isConnected: boolean;
 }
@@ -637,4 +657,84 @@ export interface MarketPulse {
   paidLastHourUsd: number;
   paidTodayUsd: number;
   paidAllTimeUsd: number;
+}
+
+// ── The market's recent past (the admin bid-market gallery; one day a public variant) ──────────
+
+/**
+ * One verified view or click, as the market saw it. Identity-free BY CONSTRUCTION, exactly like
+ * PulseAd: no campaign id, no account id, no account class rides on this type - so the day a
+ * variant of this feed goes public, the shape itself cannot leak who is behind an ad.
+ *
+ * `kind` is the honest money story of the event:
+ *  - 'charged'    a real advertiser paid its own bid (this is a first-price market)
+ *  - 'subsidized' a house ad was shown to a real developer and the platform paid their share
+ *  - 'unpaid'     the $0 house fallback served - bills nobody, pays nothing, and says so
+ */
+export interface MarketEvent {
+  /** Server receipt time, ISO. */
+  at: string;
+  /** The exact bid that priced this event. 0 for unpaid house serves. */
+  bidCpm: number;
+  /** The money that actually moved: the charge, or the subsidized dev share. 0 when unpaid. */
+  amountUsd: number;
+  brandName: string | null;
+  /** The sponsored line, already public by nature (it is served into strangers' editors). */
+  line: string;
+  placement: string;
+  kind: 'charged' | 'subsidized' | 'unpaid';
+  click: boolean;
+}
+
+/**
+ * The auction's standing state at one moment, recorded every ~60s by the snapshot job. This table
+ * exists because nothing else remembers standing bids: `Campaign.bidCpm` is overwritten on edit
+ * and the Redis set only knows "now". A quiet minute writes an honest quiet row - zero bidders is
+ * a fact worth recording, never a gap to paper over.
+ */
+export interface AuctionSnapshotPoint {
+  at: string;
+  /** Σ of every live bid at that moment - the size of the pot. */
+  potCpm: number;
+  bidderCount: number;
+  /** The standing order book, identity-free: brand + bid only. */
+  bids: { brandName: string | null; bidCpm: number }[];
+  /** placement -> the slot labels actually being served (brand name, or 'house' for the fallback). */
+  slots: Record<string, string[]>;
+}
+
+/** The bid market over the recent past: what was served (events) and what stood (snapshots). */
+export interface MarketHistory {
+  events: MarketEvent[];
+  snapshots: AuctionSnapshotPoint[];
+  /** True when the event cap cut the oldest part of the window. */
+  truncated: boolean;
+  /** The instant events are complete from - the window start, or the cut point when truncated. */
+  coverageFrom: string;
+}
+
+/* ── Docs feedback ──────────────────────────────────────────────────────────── */
+
+export type DocFeedbackKind = 'helpful' | 'unhelpful' | 'outdated';
+
+/** Per-article feedback counts for the admin view. Identity-free by construction. */
+export interface DocFeedbackSummary {
+  slug: string;
+  helpful: number;
+  unhelpful: number;
+  outdated: number;
+}
+
+/** One reader note, newest first in the admin list. */
+export interface DocFeedbackNote {
+  slug: string;
+  kind: DocFeedbackKind;
+  note: string;
+  at: string;
+}
+
+/** GET /v1/admin/docs/feedback - the staleness loop's admin surface. */
+export interface DocFeedbackAdminResponse {
+  summaries: DocFeedbackSummary[];
+  notes: DocFeedbackNote[];
 }

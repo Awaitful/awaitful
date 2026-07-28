@@ -60,7 +60,7 @@ test('chooseTargets: the boring rules, all of them', () => {
 });
 
 test('displayCommand shows exactly what will run, quoting paths with spaces', () => {
-  assert.equal(displayCommand(found('code')), 'code --install-extension awaitful.awaitful');
+  assert.equal(displayCommand(found('code')), 'code --install-extension awaitful.awaitful --force');
 
   const editor = EDITORS.find(e => e.id === 'code');
   assert.ok(editor);
@@ -71,7 +71,7 @@ test('displayCommand shows exactly what will run, quoting paths with spaces', ()
   };
   assert.equal(
     displayCommand(appBundle),
-    '"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --install-extension awaitful.awaitful',
+    '"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --install-extension awaitful.awaitful --force',
   );
 });
 
@@ -89,4 +89,16 @@ test('parseInstalledVersion finds our extension and nothing else', () => {
   assert.equal(parseInstalledVersion('notawaitful.awaitful@9.9.9'), null);
   // Case-insensitive, as editor listings are on some platforms.
   assert.equal(parseInstalledVersion('Awaitful.Awaitful@1.2.3'), '1.2.3');
+});
+
+/**
+ * The regression that mattered. Without --force, `--install-extension` sees ANY installed version,
+ * prints "already installed", exits 0 and does nothing - so `npx awaitful` silently refused to
+ * update the very users most likely to run it, while printing "installed" in green.
+ */
+test('the install command forces an upgrade, or it cannot update an existing install', () => {
+  assert.ok(
+    displayCommand(found('code')).endsWith('--force'),
+    'dropping --force makes npx awaitful a no-op for anyone who already has the extension',
+  );
 });

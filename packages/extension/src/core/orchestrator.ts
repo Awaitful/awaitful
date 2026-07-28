@@ -38,6 +38,10 @@ const BANNER_FRAME_KEY = 'awaitful.chatBannerFrame';
 const TERMINAL_ENABLED_KEY = 'awaitful.terminalEnabled';
 // Show accrued earnings in the status bar (idle state only) - a device-local privacy preference.
 const SHOW_EARNINGS_KEY = 'awaitful.showEarningsInStatusBar';
+// One-time, once-ever: after a user earns their first cents while still on the base status-bar
+// surface, gently point them at the higher-value placements. Never shown to anyone who already
+// explored (moved off status-bar or turned on the terminal) - discoverability, not a nag.
+const PLACEMENT_NUDGE_KEY = 'awaitful.placementNudgeShown';
 // A competitor that also patches Claude Code can overwrite our take-over on reload. We RECLAIM the
 // surface (restore the verified original + re-apply) a bounded number of times — winning against a
 // passive competitor — before yielding honestly to an aggressive one. Awaitful never touches another
@@ -718,12 +722,39 @@ export class Orchestrator {
     if (earnings.status === 'fulfilled') {
       this.earningsToday = earnings.value.todayUsd;
       this.unredeemedUsd = earnings.value.unredeemedUsd;
+      this.maybeNudgePlacements();
     }
     if (me.status === 'fulfilled' || earnings.status === 'fulfilled') {
       this.syncPanel();
       // Refresh the idle status-bar earnings, but never clobber a live ad.
       if (this.activeAdLine === undefined) this.applyState(this.activeState());
     }
+  }
+
+  /**
+   * First-earning nudge: once ever, after the user has actually earned something while still on the
+   * base status-bar surface, surface that higher-value placements exist. Gated so explorers (anyone
+   * who already moved off status-bar or turned on the terminal) and repeat sessions never see it -
+   * this is discoverability, not a nag, and the safe default is never punished for staying put.
+   */
+  private maybeNudgePlacements(): void {
+    if (this.context.globalState.get<boolean>(PLACEMENT_NUDGE_KEY) === true) return;
+    // Never while paused: the copy says "you are earning", which must be true when shown, and a paused
+    // mis-fire would also burn the one-shot flag so the real nudge never appears once they resume.
+    if (!this.enabled) return;
+    const earned = parseFloat(this.unredeemedUsd ?? '0') > 0 || parseFloat(this.earningsToday ?? '0') > 0;
+    const onBaseOnly = this.activeSurface === 'status-bar' && !this.terminalEnabled;
+    if (!earned || !onBaseOnly) return;
+    // Set the flag before showing so a concurrent refresh can never double-fire it.
+    void this.context.globalState.update(PLACEMENT_NUDGE_KEY, true);
+    void vscode.window
+      .showInformationMessage(
+        'Awaitful: nice, you are earning on the status bar. You can earn more by showing the ad in a higher-value spot, like the thinking line. Want to see your options?',
+        'Show placements',
+      )
+      .then((pick) => {
+        if (pick === 'Show placements') this.openPanel();
+      });
   }
 
   // ── Panel ───────────────────────────────────────────────────────────────
@@ -881,6 +912,11 @@ export class Orchestrator {
         break;
       case 'reload-window':
         this.reloadWindow();
+        break;
+      case 'open-extensions':
+        // Open the Extensions view filtered to the conflict fix (the competitor, or Claude Code),
+        // so the guided steps land the user exactly where they need to click.
+        void vscode.commands.executeCommand('workbench.extensions.search', msg.query || '');
         break;
       case 'open-github':
         void vscode.env.openExternal(vscode.Uri.parse(LINKS.sourceCode));
@@ -1081,10 +1117,11 @@ export class Orchestrator {
           return;
         }
       }
-      // Lost the patch-war (or reclaim failed) → yield and guide the user honestly.
+      // Lost the patch-war (or reclaim failed) → yield and guide the user honestly. Pristine was
+      // recoverable here, so disabling the competitor is enough (no reinstall needed).
       this.recipeClient.report('conflict');
       this.stepBackToStatusBar(interactive);
-      if (interactive) this.notifyCompetitorConflict(chosen, a.foreign?.vendor);
+      if (interactive) this.notifyCompetitorConflict(chosen, a.foreign?.vendor, true);
       return;
     }
 
@@ -1092,7 +1129,8 @@ export class Orchestrator {
     this.recipeClient.report(a.state === 'modified' ? 'conflict' : 'unknown-build');
     this.stepBackToStatusBar(interactive);
     if (interactive) {
-      if (a.state === 'modified') this.notifyCompetitorConflict(chosen, a.foreign?.vendor);
+      // 'modified' with no recoverable pristine → disabling alone can't fix it (reinstall needed).
+      if (a.state === 'modified') this.notifyCompetitorConflict(chosen, a.foreign?.vendor, false);
       else this.notifyWebviewSurfacePaused(chosen, a.target?.buildId);
     }
   }
@@ -1113,19 +1151,27 @@ export class Orchestrator {
   // Notified at most once per (competitor, surface) per session — never nag on every fs event.
   private readonly pausedNotified = new Set<string>();
 
-  /** Honest guidance when a competitor keeps re-modifying CC and we've stopped fighting the war. */
-  private notifyCompetitorConflict(id: WebviewSurface, vendor: string | undefined): void {
+  /**
+   * Honest guidance when a competitor keeps re-modifying CC and we've stopped fighting the war.
+   * The message branches on `recoverable`: when we hold a verified-clean copy, disabling the
+   * competitor is enough; when we don't, disabling alone can't help (its edit is already on disk),
+   * so we're honest that a clean Claude Code (reinstall) is what's needed. The detailed, click-through
+   * fix lives on the surface's page in the panel, so we offer a way back into it.
+   */
+  private notifyCompetitorConflict(id: WebviewSurface, vendor: string | undefined, recoverable: boolean): void {
     const who = vendor ?? 'Another extension';
     const key = `conflict:${who}:${id}`;
     if (this.pausedNotified.has(key)) return;
     this.pausedNotified.add(key);
-    void vscode.window.showWarningMessage(
-      `Awaitful: ${who} keeps re-modifying Claude Code and overwriting the ${surfaceLabel(id)}. Awaitful never changes another extension's files, so disable ${who} to use the ${surfaceLabel(id)} - status-bar mode is active and earning meanwhile.`,
-      'Manage extensions',
-    ).then((pick) => {
+    const label = surfaceLabel(id);
+    const message = recoverable
+      ? `Awaitful: ${who} keeps changing Claude Code and overwriting the ${label}. Disable ${who} so the two stop fighting over the same file, then reopen Awaitful to switch back to the ${label}. Status-bar mode is active and earning meanwhile.`
+      : `Awaitful: ${who} changed Claude Code and Awaitful has no clean copy to restore, so the ${label} is paused. Disabling ${who} stops new changes but will not undo the ones already on disk - reinstalling Claude Code restores a clean copy. Status-bar mode is active and earning meanwhile.`;
+    void vscode.window.showWarningMessage(message, 'Manage extensions', 'Open Awaitful').then((pick) => {
       // We can't disable another extension ourselves (no VS Code API, and it would be user-hostile);
-      // we just open the Extensions view so the user can disable it with one click.
+      // we open the Extensions view so the user can do it, or the panel where the guided fix lives.
       if (pick === 'Manage extensions') void vscode.commands.executeCommand('workbench.view.extensions');
+      else if (pick === 'Open Awaitful') this.openPanel();
     });
   }
 
