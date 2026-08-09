@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AD_SPINNERS, DEFAULT_SPINNER_ID, getSpinner, frameAt } from '../ui/spinners.js';
+import { AD_SPINNERS, DEFAULT_SPINNER_ID, getSpinner, frameAt, GLOW_THEMES, DEFAULT_GLOW_THEME, BANNER_FRAMES, DEFAULT_BANNER_FRAME } from '../adCustomization.js';
 
 describe('ad spinner registry', () => {
   it('has unique ids and the promised default', () => {
@@ -46,5 +46,19 @@ describe('ad spinner registry', () => {
     expect(frameAt(claude, 12_345)).toBe(frameAt(claude, 12_345 + cycle));
     // The none spinner never has a frame.
     expect(frameAt(getSpinner('none'), 999)).toBe('');
+  });
+});
+
+describe('chat-banner glow themes + frames', () => {
+  it('has unique theme ids and the promised default', () => {
+    const ids = GLOW_THEMES.map(t => t.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain(DEFAULT_GLOW_THEME);
+  });
+
+  it('has unique frame ids and the promised default', () => {
+    const ids = BANNER_FRAMES.map(f => f.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain(DEFAULT_BANNER_FRAME);
   });
 });

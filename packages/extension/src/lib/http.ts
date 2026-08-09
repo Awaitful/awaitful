@@ -12,6 +12,9 @@ export async function getJson<T>(url: string, token?: string): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(url, { headers });
+  // 204 = "nothing here" (e.g. the recipe poll's "no recipe yet"). Return undefined rather than
+  // throwing on an empty body, so every GET can flow through this one chokepoint - matching postJson.
+  if (res.status === 204) return undefined as T;
   if (!res.ok) throw new HttpError(res.status, `GET ${url} → ${res.status}`);
   return res.json() as Promise<T>;
 }

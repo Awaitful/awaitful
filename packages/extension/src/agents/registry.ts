@@ -13,16 +13,13 @@ export function agentIntegration(id: AgentId): AgentIntegration | undefined {
   return AGENT_INTEGRATIONS.find((a) => a.agent === id);
 }
 
-/** The present agents whose terminal status line we can drive. */
-export async function presentStatusLineAgents(): Promise<AgentIntegration[]> {
-  const present = await Promise.all(
-    AGENT_INTEGRATIONS.map(async (a) => (a.supportsStatusLine && (await a.isPresent()) ? a : null)),
-  );
-  return present.filter((a): a is AgentIntegration => a !== null);
-}
-
-/** The present agents whose thinking we can detect (for hook install on activation). */
-export async function presentAgents(): Promise<AgentIntegration[]> {
-  const present = await Promise.all(AGENT_INTEGRATIONS.map(async (a) => ((await a.isPresent()) ? a : null)));
-  return present.filter((a): a is AgentIntegration => a !== null);
-}
+/**
+ * The agent a fired thinking hook can only have come from. Exactly one agent ships, so a hook that
+ * fired proves THAT agent — an exact attribution, not a guess. Feeds `detectAgents({ provenCli })`
+ * so someone who is already earning can never be switched off by a detector that got it wrong.
+ *
+ * The length check makes this self-disable the day a second agent lands, which forces the correct
+ * fix (hooks posting their own agent id, hooks/setup.ts) instead of silently mis-attributing.
+ */
+export const HOOK_PROVEN_AGENTS: readonly AgentId[] =
+  AGENT_INTEGRATIONS.length === 1 ? [AGENT_INTEGRATIONS[0]!.agent] : [];

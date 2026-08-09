@@ -18,6 +18,16 @@ export class SurfaceSession {
   private renderedFired = false;
   private thresholdFired = false;
   private visibleMs = 0;
+  /**
+   * The shim instance that actually painted this creative. Latched by the first matching `rendered`
+   * and required by every beacon after it.
+   *
+   * Without this, two open Claude Code webviews - two windows, or VS Code and Cursor side by side -
+   * both fetch the same creative and both post `visible {visibleMs:1000}` at 1 Hz into this one
+   * accumulator, so `view_threshold_met` fires after half the visible time it represents. That is
+   * billing for time nobody watched (golden rule 3), and it is invisible in any single-window test.
+   */
+  private boundShimId: string | undefined;
 
   constructor(
     private readonly emit: Emit,
@@ -30,10 +40,12 @@ export class SurfaceSession {
     this.renderedFired = false;
     this.thresholdFired = false;
     this.visibleMs = 0;
+    this.boundShimId = undefined;
   }
 
   end(): void {
     this.creative = null;
+    this.boundShimId = undefined;
   }
 
   /**
@@ -50,12 +62,17 @@ export class SurfaceSession {
   }
 
   private matches(b: SurfaceBeacon): boolean {
-    return !!this.creative && b.adId === this.creative.adId && b.slateId === this.creative.slateId;
+    if (!this.creative || b.adId !== this.creative.adId || b.slateId !== this.creative.slateId) return false;
+    // Once a shim has painted, only that shim's beacons count for this impression. A second webview
+    // showing the same creative is a second view of the same ad, not more time on the first.
+    if (this.boundShimId !== undefined && b.shimId !== this.boundShimId) return false;
+    return true;
   }
 
   rendered(b: SurfaceBeacon): void {
     if (!this.matches(b) || this.renderedFired) return;
     this.renderedFired = true;
+    this.boundShimId = b.shimId; // whoever painted first owns this impression
     this.emit('impression_rendered');
   }
 

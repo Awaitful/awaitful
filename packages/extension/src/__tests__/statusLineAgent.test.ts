@@ -7,19 +7,30 @@ import { statusLineScriptPath, prevJsonPath, prevScriptPath } from '../hooks/sta
 
 // Editor-safety: these touch the user's ~/.claude/settings.json, so they must preserve + restore
 // it exactly. Temp HOME so the real settings are never touched (mirrors hooksSetup.test.ts).
+const ENV_KEYS = ['HOME', 'PATH', 'CLAUDE_CONFIG_DIR', 'AWAITFUL_SYSTEM_BIN_DIRS'] as const;
+
 let tmpDir: string;
-let origHome: string | undefined;
+let saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'awaitful-sl-'));
-  origHome = process.env['HOME'];
+  saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   process.env['HOME'] = tmpDir;
+  // The presence assertion below is a NEGATIVE one, so the real machine's Claude Code must not leak
+  // in through $PATH, a system bin dir, or a relocated config dir.
+  process.env['PATH'] = '';
+  process.env['AWAITFUL_SYSTEM_BIN_DIRS'] = '';
+  delete process.env['CLAUDE_CONFIG_DIR'];
   fs.mkdirSync(path.join(tmpDir, '.claude'), { recursive: true });
   fs.mkdirSync(path.join(tmpDir, '.awaitful'), { recursive: true });
 });
 
 afterEach(() => {
-  process.env['HOME'] = origHome;
+  for (const k of ENV_KEYS) {
+    const v = saved[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -97,9 +108,17 @@ describe('claudeCodeAgent.removeStatusLine', () => {
 });
 
 describe('claudeCodeAgent metadata', () => {
-  it('is a status-line-capable, present agent', async () => {
+  it('is a status-line-capable agent that names its editor extension', () => {
     expect(claudeCodeAgent.agent).toBe('claude-code');
     expect(claudeCodeAgent.supportsStatusLine).toBe(true);
-    expect(await claudeCodeAgent.isPresent()).toBe(true);
+    expect(claudeCodeAgent.editorExtensionId).toBe('anthropic.claude-code');
+  });
+
+  // What this replaces was `expect(await isPresent()).toBe(true)` against a fixture whose HOME
+  // contains nothing but the two directories the fixture itself creates — it PINNED the bug it
+  // looked like it was guarding. Presence is evidence-based now, and this fixture is precisely a
+  // machine where Claude Code has never run.
+  it('reports no CLI on a machine where Claude Code has never run', async () => {
+    expect(await claudeCodeAgent.detectCli()).toBe(false);
   });
 });

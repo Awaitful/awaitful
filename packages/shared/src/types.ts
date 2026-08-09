@@ -38,6 +38,15 @@ export interface AdSlateResponse {
    * honest "earns N× the default" comparisons without a separate endpoint.
    */
   placementWeights?: Record<string, number>;
+  /**
+   * The account's synced-settings version. Carried on the slate because the device already polls it
+   * every 60s with its token - so settings reach an editor within a minute rather than five, with
+   * no new request and nothing new leaving the machine. The device compares it against the last
+   * version it applied and fetches /v1/me only when they differ.
+   *
+   * Absent for an anonymous slate (no account to have settings).
+   */
+  prefsVersion?: number;
 }
 
 export interface AdEvent {
@@ -82,7 +91,8 @@ export type StatusBarState =
   | 'signin'
   | 'earning'
   | 'off'
-  | 'incompatible'
+  // No coding agent found on this machine, so no thinking event can fire and no surface can earn.
+  | 'no-agent'
   | 'offline'
   | 'killed'
   | 'reload-to-earn';
@@ -192,11 +202,30 @@ export interface CampaignMarketData {
 
 // ── Earnings ───────────────────────────────────────────────────────────────────
 
+/**
+ * One row in the earnings history. Sourced from AdEventLog, not LedgerEntry - a house ad or an
+ * over-cap event never gets a ledger row (it bills nobody), but it genuinely rendered on the
+ * developer's machine and belongs in the list all the same, honestly marked `paid: false`.
+ */
 export interface EarningEntry {
+  /** The underlying ad event's id. No longer a ledger-entry id - a $0 row has no ledger entry to
+   *  key off, so the event itself (unique per view/click) is the only stable id every row has. */
   id: string;
-  amountUsd: string;
   placement: string | null;
   createdAt: string;
+  /** 'view' = a verified view (view_threshold_met); 'click' = a click on the line. */
+  type: 'view' | 'click';
+  /** Always present, '0.000000' when unpaid - never omitted, never a lie. */
+  amountUsd: string;
+  /** False for a house ad, an over-cap event, or any other reason the view rendered but did not
+   *  bill (docs: "Shown but not credited"). */
+  paid: boolean;
+  /** Milliseconds the line was visible for this event. Null when not tracked (e.g. a click). */
+  visibleMs: number | null;
+  /** The sponsored line's own text, as shown. Null if the creative could not be resolved. */
+  line: string | null;
+  /** The advertiser's brand name, if the creative carries one. */
+  brandName: string | null;
 }
 
 export interface EarningsByPlacement {
@@ -235,6 +264,16 @@ export interface EarningsSummary {
   streakDays: number;
   byPlacement: EarningsByPlacement[];
   recent: EarningEntry[];
+  /** Current rate-card weight per placement (e.g. thinking-line: 0.8), so the web can show real
+   *  "N× earnings" labels without a 4th ad-serving-shaped endpoint. Same shape as
+   *  `AdSlateResponse.placementWeights`. Optional only for response-shape symmetry with that type. */
+  placementWeights?: Record<string, number>;
+  /** The placement of the account's single most recent ad event, billed or not. Unlike `recent`
+   *  (ledger-derived, so a $0 house ad never appears in it - a quiet market or deliberate house-ad
+   *  testing would leave it stuck on stale data), this reads AdEventLog directly, so it reflects
+   *  which surface is genuinely active right now even when nothing is billing. `null` if the account
+   *  has never served an event. */
+  lastActivePlacement: string | null;
   /**
    * The per-account daily earning cap and today's position against it (FINANCE.md §6). A published,
    * deterministic cap is a RULE, not silent confiscation - so the developer sees it. Beyond the cap
@@ -287,6 +326,15 @@ export interface CampaignCreative {
   moderation: ModerationStatus;
 }
 
+export interface CampaignByPlacement {
+  /** The surface the ad ran on (status-bar, thinking-line, terminal, browser, chat-banner). */
+  placement: string;
+  /** Verified billable views (view_threshold_met) for this campaign on this surface. */
+  impressions: number;
+  /** Clicks for this campaign on this surface. */
+  clicks: number;
+}
+
 export interface CampaignWithCreative {
   id: string;
   status: CampaignStatus;
@@ -301,6 +349,8 @@ export interface CampaignWithCreative {
   impressions: number;
   /** Lifetime clicks for this campaign. */
   clicks: number;
+  /** Per-surface breakdown of this campaign's lifetime impressions + clicks, busiest surface first. */
+  byPlacement: CampaignByPlacement[];
 }
 
 export interface CreateCampaignInput {
@@ -369,13 +419,81 @@ export interface PayoutOption {
 
 export type UserRole = 'advertiser' | 'developer' | 'admin';
 
+/**
+ * The three primary, mutually-exclusive VS Code surfaces a developer can set as their preferred
+ * destination from the web dashboard. Terminal is excluded on purpose - its rate-card weight is
+ * additive-only (it stacks on top of a webview surface, never a destination in its own right) - and
+ * 'browser' is unimplemented.
+ */
+export type RemoteSurfaceId = 'status-bar' | 'thinking-line' | 'chat-banner';
+
+/**
+ * Ad-rendering preferences settable from the web dashboard, synced to every linked device
+ * automatically - unlike `remoteSurfacePreference`, none of these touch a Claude Code file (no
+ * patch, no golden-rule-2 consent gate applies), so there is nothing to confirm and no toast to
+ * show. Sparse and optional field-by-field, same convention as `notificationPrefs`: an absent field
+ * means "this device keeps deciding locally". Ids are validated against the live registries in
+ * `adCustomization.ts` (AD_SPINNERS / GLOW_THEMES / BANNER_FRAMES) - adding an option there is the
+ * only change needed for both the extension and the web to offer it.
+ */
+/**
+ * Per-format customization, stored flat and keyed `${format}.${element}` (see syncedSettings).
+ *
+ * A loose record rather than an enumerated shape on purpose: the valid pairs are declared once in
+ * AD_FORMATS, and a second list here would be one more thing to keep in step. The four legacy
+ * account-wide keys (`spinner`, `brandLogo`, `chatBannerStyle`, `chatBannerFrame`) may still be
+ * present on older rows; they are read as a seed and never written back.
+ */
+export type AdPreferences = Record<string, string | boolean>;
+
 export interface UserMe {
   email: string;
+  /** Display name, if the account has one set (Better Auth `User.name`, trimmed; null if blank). */
+  name: string | null;
   role: UserRole[];
   deviceCount: number;
   /** external = a real user; internal = the owner's own dev/test/house accounts (wash traffic, and
    *  the only accounts allowed to create house ads). system = a reserved ledger account. */
   accountClass: 'external' | 'internal' | 'system';
+  /** Account-wide preferred surface, set from the web dashboard and pushed to every linked device.
+   *  `null` = unset - each device keeps deciding locally, today's unchanged behavior. */
+  remoteSurfacePreference: RemoteSurfaceId | null;
+  /**
+   * The most recent surface a linked device confirmed it actually applied - reported by the device
+   * itself, immediately on success, independent of whether an ad has rendered there yet (that can
+   * take arbitrarily long: the line only exists while the agent is genuinely thinking). This is what
+   * lets the web distinguish "applied, waiting for the first ad to confirm it" from "no device has
+   * done anything yet" - two very different states a single ad-event-derived signal cannot tell
+   * apart. `null` if no device has ever reported one.
+   */
+  lastAppliedSurface: RemoteSurfaceId | null;
+  /**
+   * Account-wide request for the terminal status line. `null` = unset, each device decides locally.
+   *
+   * Separate from `remoteSurfacePreference` rather than a fourth value in it, because the terminal
+   * is ADDITIVE: it runs alongside whichever VS Code format is chosen, in every terminal, so it can
+   * never be one of a mutually-exclusive set. It sits in the same PERMISSION category though -
+   * turning it on writes `~/.claude/settings.json`, so it needs the device's own consent and can
+   * only be confirmed by that device reporting back.
+   */
+  remoteTerminalEnabled: boolean | null;
+  /** What a linked device last confirmed about its terminal line, for the same reason
+   *  `lastAppliedSurface` exists: the request is not the outcome. `null` if none has reported. */
+  lastAppliedTerminal: boolean | null;
+  /** Account-wide ad-rendering preferences. `null` = unset, every field device-local (unchanged
+   *  behavior). */
+  adPreferences: AdPreferences | null;
+  /**
+   * How many linked editors already have the current settings.
+   *
+   * Inferred, never reported: a device applies these on the check-in that authenticates it, and
+   * applying them cannot fail, so a check-in after the change IS the receipt. When nothing has been
+   * set from the web this equals the device count, because every editor is on the defaults and
+   * therefore already correct.
+   */
+  settingsPickedUpBy: number;
+  /** When the settings last changed, or null if never set from the web. */
+  settingsChangedAt: string | null;
 }
 
 export interface DeviceInfo {
@@ -434,6 +552,31 @@ export interface BuildHealth {
   consensus: ConsensusState;
 }
 
+/**
+ * Public install counts from a registry the extension ships to. Not user data of any kind - both
+ * numbers are published by the registry itself and are read server-side.
+ *
+ * `installs` is unique installs where the registry exposes it (the Marketplace does, Open VSX does
+ * not, so it is null there). `downloads` is raw and counts updates. The two registries count
+ * differently, so these must never be summed into one figure.
+ */
+export interface RegistryStat {
+  registry: 'marketplace' | 'open-vsx';
+  label: string;
+  /** Which editors install from this registry - the whole reason the split is interesting. */
+  editors: string;
+  installs: number | null;
+  downloads: number | null;
+  url: string;
+  /** Set when this registry could not be read, so the UI never implies the other is the whole picture. */
+  error?: string;
+}
+
+export interface MarketplaceStats {
+  fetchedAt: string; // ISO
+  registries: RegistryStat[];
+}
+
 /** Top-level patch-health summary — the dashboard and the governance list share this. */
 export interface PatchHealthSummary {
   generatedAt: string; // ISO
@@ -475,6 +618,77 @@ export interface InvariantResult {
   detail: string;
   /** A few offending transaction ids, when there are any. Never the whole list. */
   breaches?: string[];
+}
+
+/**
+ * The payout demand map (docs/FINANCE.md §4.4): for each region where developers registered interest in
+ * a payout rail that does not serve them yet, how many are waiting and how much unpaid USD is stacked up
+ * behind them. This is the READ side of the Phase A demand instrument - the signal that decides which
+ * rail to build next, instead of guessing. One row per country, balances joined LIVE from the ledger.
+ */
+export interface PayoutDemandRow {
+  /** ISO 3166-1 alpha-2 of the region developers are waiting on. */
+  country: string;
+  /** How many developers named this region. */
+  developers: number;
+  /** Their combined unredeemed (earned-but-unpaid) balance - the money a rail here would unlock. */
+  unpaidUsd: number;
+  /** The earliest wait in this region, ISO timestamp - how long the demand has gone unmet. */
+  oldestWaitAt: string;
+  /** True if a rail now serves this region after all (stale demand: they can onboard now). */
+  nowSupported: boolean;
+}
+
+export interface PayoutDemand {
+  /** Regions, ordered by unpaid balance then developer count - the build-this-next ranking. */
+  rows: PayoutDemandRow[];
+  totalDevelopers: number;
+  totalUnpaidUsd: number;
+  generatedAt: string;
+}
+
+/**
+ * The W-8BEN a developer submits so Awaitful can document their FOREIGN status on a remittance rail
+ * (Wise) whose KYC is not an IRS Chapter-3 form (docs/FINANCE.md §4.4). Structured fields + an electronic
+ * attestation; the server stamps `signedAt` and derives the statutory expiry. It never carries a US TIN -
+ * a W-8BEN is for a NON-US person (a US person files a W-9), so US citizenship is refused up front.
+ */
+export interface W8BenAddress {
+  line1: string;
+  line2?: string;
+  city: string;
+  region?: string;
+  postalCode?: string;
+  /** ISO-2. A permanent residence address, never a US address for a foreign person. */
+  country: string;
+}
+
+export interface W8BenInput {
+  name: string;
+  /** ISO-2 country of citizenship; must not be 'US'. */
+  countryOfCitizenship: string;
+  permanentAddress: W8BenAddress;
+  mailingAddress?: W8BenAddress;
+  /** Foreign tax identifying number (line 6). Never a US TIN/SSN. */
+  foreignTin?: string;
+  /** ISO date YYYY-MM-DD (line 8). */
+  dateOfBirth?: string;
+  /** ISO-2, an optional treaty-benefit claim. */
+  treatyCountry?: string;
+  /** The typed signature, made under penalties of perjury. */
+  signedName: string;
+  /** Must be true: the developer attests the certification. */
+  certified: boolean;
+}
+
+/** Whether a valid (non-expired) W-8BEN is on file, and when it lapses. */
+export interface W8BenStatus {
+  onFile: boolean;
+  name: string | null;
+  signedAt: string | null;
+  expiresAt: string | null;
+  /** True when a form exists but has passed its expiry (re-collection needed). */
+  expired: boolean;
 }
 
 /** What the platform earned, owes, and holds. Every figure is derived from the ledger. */
@@ -711,6 +925,29 @@ export interface MarketHistory {
   truncated: boolean;
   /** The instant events are complete from - the window start, or the cut point when truncated. */
   coverageFrom: string;
+}
+
+/**
+ * The PUBLIC bid-market history: strictly aggregate, one point per snapshot. Unlike the admin
+ * AuctionSnapshotPoint it carries NO per-brand `bids` array and NO `slots`, only the three numbers
+ * a line chart needs. This is deliberate: a time series of (brand, bid) would let a stranger track a
+ * named advertiser's bid trajectory, which the admin market route warns is not public. Aggregates
+ * over the whole book reveal no single advertiser, exactly like the pulse's top-bid quote.
+ */
+export interface PublicMarketPoint {
+  /** Snapshot time, ISO. */
+  at: string;
+  /** The highest live bid at that moment (per 1,000 views) - the market-clearing price line. */
+  topBidCpm: number;
+  /** Σ of every live bid at that moment - the size of the pot. */
+  potCpm: number;
+  bidderCount: number;
+}
+
+export interface PublicMarketHistory {
+  points: PublicMarketPoint[];
+  /** The window's newest snapshot time, ISO - the "as of" that proves the market is alive now. */
+  asOf: string | null;
 }
 
 /* ── Docs feedback ──────────────────────────────────────────────────────────── */

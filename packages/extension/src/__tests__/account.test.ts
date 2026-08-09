@@ -46,6 +46,27 @@ describe('AccountClient', () => {
     );
   });
 
+  /**
+   * The terminal is additive, so it reports its own on/off rather than being a fourth surface id.
+   * BOTH outcomes go on the wire: a device that turns the line off is confirming just as much as one
+   * that turns it on, and without the off report the dashboard keeps showing a stale "Running".
+   */
+  it.each([true, false])('reportTerminalApplied puts enabled=%s on the wire', async enabled => {
+    const fetchFn = mockFetchOnce(204, undefined);
+
+    const client = new AccountClient('http://localhost:3000');
+    await client.reportTerminalApplied('tok-1', enabled);
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://localhost:3000/v1/me/terminal-applied',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+        headers: expect.objectContaining({ Authorization: 'Bearer tok-1' }),
+      }),
+    );
+  });
+
   it('throws HttpError with the status on a revoked token', async () => {
     mockFetchOnce(401, { error: 'Token revoked or unlinked' });
 

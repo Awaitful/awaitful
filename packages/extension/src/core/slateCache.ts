@@ -68,6 +68,11 @@ export class SlateCache {
     return this.slate?.placementWeights;
   }
 
+  /** The account's synced-settings version, when the slate was fetched with a token. */
+  get prefsVersion(): number | undefined {
+    return this.slate?.prefsVersion;
+  }
+
   dispose(): void {
     this.stopPolling();
   }

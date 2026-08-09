@@ -4,11 +4,11 @@ import {
   RECIPE, RecipeResponseSchema,
   type RecipeResponse, type AgentId, type PatchOutcome, type PatchReportRequest,
 } from '@awaitful/shared';
-import { postJson } from '../lib/http.js';
+import { getJson, postJson } from '../lib/http.js';
 import { sha256 } from './hash.js';
 import { assembleRecipe, findRecipe, MARKER_PREFIX, CSP_FIND, type PatchRecipe, type RecipeTarget } from './recipe.js';
 import { hasOurPatch, stripFromContent } from './engine.js';
-import { detectForeign } from './foreign.js';
+import { detectForeign, foreignMarkerToken } from './foreign.js';
 import { findClaudeTarget, type ClaudeTarget } from './targets.js';
 
 // Only agent today. The recipe/consensus machinery is agent-agnostic (data model + contract carry
@@ -36,20 +36,51 @@ const SHAPE_SHA = '0'.repeat(64);
 
 /**
  * Recover a genuine-pristine target from a competitor's sibling backup — the competitor's OWN saved
- * original, the same source the engine's take-over already trusts. Accept it ONLY if it structurally
- * IS unpatched Claude Code our recipe can patch: it carries no Awaitful marker, and it contains the
- * anchor the target's strategy needs (CC's spinner class for the webview; our exact CSP anchor for
- * extension.js). A garbage or wrong backup fails these and we simply don't offer a take-over
- * (fail-safe → the surface stays unavailable rather than a patch that would roll back). Returns the
- * backup's content (to hash), or undefined.
+ * original, the same source the engine's take-over already trusts.
+ *
+ * The competitor's "original" is only original from ITS point of view. If it installed after us, it
+ * saved the file WE had already patched, so its backup legitimately carries our block. Refusing that
+ * outright (as this did) strands the user: no pristine, no recipe, `unknown-build`, and a panel that
+ * blames the Claude Code version for a competitor's leftovers. So we STRIP our own block — the same
+ * byte-exact, version-agnostic inverse of applyToContent that the engine already relies on — and
+ * judge the RESULT, never the raw backup.
+ *
+ * Accept only content that structurally IS unpatched Claude Code our recipe can patch: no Awaitful
+ * marker survives the strip, no OTHER tool's marker is present (a residue containing a competitor's
+ * block is not pristine, and hashing it would make us write their code back as "the original"), and
+ * it carries the anchor the target's strategy needs. Anything else fails safe to undefined — the
+ * surface stays unavailable rather than a patch that would roll back.
  */
-function recoverPristine(backupPath: string | undefined, anchor: string): string | undefined {
+function recoverPristine(
+  backupPath: string | undefined,
+  anchor: string,
+  t: RecipeTarget,
+): string | undefined {
   if (!backupPath) return undefined;
-  const content = readUtf8(backupPath);
-  if (content === undefined) return undefined;
-  if (content.includes(MARKER_PREFIX)) return undefined;   // never "recover" our own patch
-  if (!content.includes(anchor)) return undefined;         // must be patchable genuine Claude Code
-  return content;
+  const raw = readUtf8(backupPath);
+  if (raw === undefined) return undefined;
+
+  let content = raw;
+  if (hasOurPatch(content, t)) {
+    const stripped = stripFromContent(content, t);
+    if (stripped === undefined) return undefined; // truncated/corrupt block — never guess
+    content = stripped;
+  }
+  return isDerivedPristine(content, anchor, t) ? content : undefined;
+}
+
+/**
+ * Would this content be a safe thing to call PRISTINE? The single gate every derivation passes
+ * through, so the live-file path and the competitor-backup path can never disagree.
+ *
+ * A second Awaitful marker means the file was double-patched and one strip did not clear it; a
+ * foreign marker means another tool's code is still embedded; a missing anchor means it is not
+ * patchable Claude Code at all. Any of the three and we have no pristine — not a best guess.
+ */
+function isDerivedPristine(content: string, anchor: string, t: RecipeTarget): boolean {
+  if (hasOurPatch(content, t) || content.includes(MARKER_PREFIX)) return false;
+  if (foreignMarkerToken(content) !== undefined) return false;
+  return content.includes(anchor);
 }
 
 /**
@@ -115,15 +146,14 @@ export class RecipeClient {
     const url = `${this.base}/v1/recipe?agent=${AGENT}&build=${encodeURIComponent(target.buildId)}`;
     const token = this.getToken();
     try {
-      const res = await fetch(url, {
-        headers: token ? { Accept: 'application/json', Authorization: `Bearer ${token}` } : { Accept: 'application/json' },
-      });
-      if (res.status === 204) { this.server.delete(target.buildId); return; } // no recipe yet
-      if (!res.ok) return;                                                     // 401/5xx → keep last-known
-      const resp = RecipeResponseSchema.parse(await res.json()) as RecipeResponse;
+      // Through the one egress chokepoint (lib/http.ts), like every other server call. getJson
+      // returns undefined on a 204 ("no recipe yet") and throws on 401/5xx (caught below).
+      const body = await getJson<unknown>(url, token);
+      if (body === undefined) { this.server.delete(target.buildId); return; } // 204: no recipe yet
+      const resp = RecipeResponseSchema.parse(body) as RecipeResponse;
       this.server.set(target.buildId, { resp, assembled: assembleRecipe(resp) });
     } catch {
-      /* network / bad body → keep last-known; embedded/self still cover us */
+      /* network / non-2xx / bad body → keep last-known; embedded/self still cover us */
     }
   }
 
@@ -165,7 +195,7 @@ export class RecipeClient {
     // Per target, establish the genuine PRISTINE content — we NEVER hash a patched live file:
     //  • our OWN patch present     → strip our patch (version-agnostic → reproduces pristine), so a
     //    build we already patched KEEPS a recipe and is recognized as 'our-patch-present' rather than
-    //    falling through to 'unknown-build' ("Coming soon"). Critically this covers upgrading over a
+    //    falling through to 'ours-unverified'. Critically this covers upgrading over a
     //    build we self-activated + patched, or a Claude Code version bump we re-applied to. It derives
     //    exactly the same pristine report() already derives by stripping, so consensus stays consistent.
     //  • competitor-patched target → recover pristine from the competitor's OWN validated sibling
@@ -203,12 +233,17 @@ export class RecipeClient {
    */
   private pristineForSelf(content: string, file: string, t: RecipeTarget, anchor: string): string | undefined {
     if (hasOurPatch(content, t)) {
+      // Ours PLUS another tool's block: stripping ours leaves THEIRS behind, and isDerivedPristine
+      // rejects that residue. Without this the residue gets hashed as "the original" and stored as a
+      // backup - which is exactly how 49 competitor-contaminated backups were produced in the field.
       const stripped = stripFromContent(content, t);
-      if (stripped === undefined || stripped.includes(MARKER_PREFIX) || !stripped.includes(anchor)) return undefined;
+      if (stripped === undefined || !isDerivedPristine(stripped, anchor, t)) return undefined;
       return stripped;
     }
     const foreign = detectForeign(file, content);
-    if (foreign.present) return recoverPristine(foreign.backupPath, anchor);
+    if (foreign.present) return recoverPristine(foreign.backupPath, anchor, t);
+    // No marker of any kind: the live file is pristine. This is the only path that may vote in
+    // consensus (report() sends clean=false whenever a foreign patch is detected).
     return content;
   }
 
@@ -222,7 +257,14 @@ export class RecipeClient {
       const web = readUtf8(f.web), ext = readUtf8(f.ext);
       if (web === undefined || ext === undefined) return;
 
-      const foreign = detectForeign(f.web, web).present || detectForeign(f.ext, ext).present;
+      // Vote eligibility keys on a foreign marker IN THE LIVE BYTES, not on `present` - which is
+      // also true for a leftover sibling backup from a tool that has since been removed. That
+      // distinction decides whether this machine can vote at all, and using `present` disenfranchised
+      // it permanently: a stray `index.js.acme-backup` sits there long after the tool is gone, and a
+      // successful take-over does not remove another tool's file. Safe because the hashes below are
+      // always derived from the LIVE file (this.pristine), never from a competitor's backup, so a
+      // competitor-derived hash still cannot reach the vote.
+      const foreignInFile = foreignMarkerToken(web) !== undefined || foreignMarkerToken(ext) !== undefined;
       // Derive the PRISTINE hash: strip our own patch if present (never report an our-patched hash).
       const recipe = this.lookup(target.buildId);
       const webPristine = this.pristine(web, recipe?.targets.find((t) => t.file === 'webview/index.js'));
@@ -231,7 +273,7 @@ export class RecipeClient {
       const req: PatchReportRequest = {
         agent: AGENT, buildId: target.buildId, version: target.version,
         webSha256: sha256(webPristine), extSha256: sha256(extPristine),
-        clean: !foreign, outcome,
+        clean: !foreignInFile, outcome,
       };
       const dedupe = `${req.buildId}|${req.webSha256}|${req.extSha256}|${req.outcome}`;
       if (this.reported.has(dedupe)) return; // rate-limit: churn can't spam

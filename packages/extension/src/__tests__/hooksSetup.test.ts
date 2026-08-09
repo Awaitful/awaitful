@@ -129,4 +129,13 @@ describe('removeClaudeHooks', () => {
   it('does nothing if settings.json does not exist', async () => {
     await expect(removeClaudeHooks()).resolves.toBeUndefined();
   });
+
+  it('never CREATES the settings file - a product that is not installed gets no config dir', async () => {
+    // This runs from Orchestrator.stop() on every deactivate. It used to read {}, delete nothing,
+    // then write settings.json back - so simply installing Awaitful and reloading the window left a
+    // ~/.claude behind on a machine that had no Claude Code.
+    fs.rmSync(path.join(tmpDir, '.claude'), { recursive: true, force: true });
+    await removeClaudeHooks();
+    expect(fs.existsSync(path.join(tmpDir, '.claude'))).toBe(false);
+  });
 });

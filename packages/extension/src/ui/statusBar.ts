@@ -1,15 +1,18 @@
 import * as vscode from 'vscode';
-import type { StatusBarState } from '@awaitful/shared';
-import { getSpinner, frameAt } from './spinners.js';
+import { getSpinner, frameAt, type StatusBarState, type AdSpinner } from '@awaitful/shared';
 
 export class StatusBarUI {
   private readonly item: vscode.StatusBarItem;
   /** The ad currently on the bar, kept so a spinner tick (or a setting change) can re-render it. */
   private ad: { line: string; hasUrl: boolean; unpaid: boolean } | undefined;
   private spinTimer: ReturnType<typeof setInterval> | undefined;
-  private readonly configSub: vscode.Disposable;
 
-  constructor() {
+  /**
+   * `spinnerFor` is injected rather than read here: the spinner is a per-format choice now, and a UI
+   * component reaching for a global setting is exactly how it stayed global. The default keeps this
+   * constructible in isolation (tests) without knowing about formats.
+   */
+  constructor(private readonly spinnerFor: () => AdSpinner = () => getSpinner(undefined)) {
     this.item = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Right,
       1000, // High priority keeps it visible before other items collapse.
@@ -17,12 +20,18 @@ export class StatusBarUI {
     this.item.command = 'awaitful.menu';
     this.setState('signin');
     this.item.show();
-    // The picker previews live: changing the setting while an ad is on the bar re-renders it.
-    this.configSub = vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('awaitful.adSpinner') && this.ad) {
-        this.showAd(this.ad.line, this.ad.hasUrl, this.ad.unpaid);
-      }
-    });
+  }
+
+  /**
+   * Redraw the ad currently on the bar with whatever the status-bar format now looks like, so a pick
+   * on its page previews in place. A no-op when nothing is showing.
+   *
+   * Called by the orchestrator rather than watched for here: this used to subscribe to a VS Code
+   * setting directly, which stopped being the source of truth the moment the spinner became a
+   * per-format choice - and a UI component watching its own settings is how it stayed global.
+   */
+  refreshAd(): void {
+    if (this.ad) this.showAd(this.ad.line, this.ad.hasUrl, this.ad.unpaid);
   }
 
   setState(state: StatusBarState, earning?: { amount?: string; tooltip?: string }): void {
@@ -61,14 +70,18 @@ export class StatusBarUI {
         this.item.tooltip = 'Awaitful cannot reach the server - will retry';
         this.item.backgroundColor = undefined;
         break;
-      case 'incompatible':
-        this.item.text = '$(error) Awaitful';
-        this.item.tooltip = 'Awaitful is incompatible with this environment';
+      case 'no-agent':
+        // Not an error and not a warning background: a developer who simply does not use Claude
+        // Code must not get a permanently yellow status bar. Calm, distinct from earning
+        // ($(circle-filled)) and paused ($(circle-outline)), and the click lands on the panel where
+        // the full explanation and the setup link live.
+        this.item.text = '$(circle-slash) Awaitful';
+        this.item.tooltip = 'No agent found - Awaitful earns while Claude Code thinks. Click to set it up.';
         this.item.backgroundColor = undefined;
         break;
       case 'reload-to-earn':
         this.item.text = '$(warning) Reload to activate';
-        this.item.tooltip = 'Click to reload the window and activate the Awaitful surface';
+        this.item.tooltip = 'Click to reload the window and activate your Awaitful ad format';
         this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         this.item.command = 'awaitful.reload';
         break;
@@ -93,7 +106,7 @@ export class StatusBarUI {
     this.item.backgroundColor = undefined;
     this.item.command = hasUrl ? 'awaitful.visitAd' : 'awaitful.menu';
 
-    const spinner = getSpinner(vscode.workspace.getConfiguration('awaitful').get<string>('adSpinner'));
+    const spinner = this.spinnerFor();
     if (spinner.frames.length === 0) {
       // Spinner "none": the static dot stays, so a sponsored line is still visibly marked.
       this.item.text = `$(circle-filled)${line}`;
@@ -119,7 +132,6 @@ export class StatusBarUI {
 
   dispose(): void {
     this.stopSpinner();
-    this.configSub.dispose();
     this.item.dispose();
   }
 }

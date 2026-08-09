@@ -1,65 +1,156 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
+import type { ResolvedElement } from '@awaitful/shared';
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+/**
+ * Why a surface cannot be chosen on this machine, or undefined when it is offerable.
+ *
+ *  - `no-agent-cli`      no coding agent is installed at all, so no thinking event can fire.
+ *  - `no-agent-editor`   the agent's CLI is here but its VS Code extension is not, so the two
+ *                        surfaces that patch that extension's bundle have nothing to attach to.
+ *                        The status bar and the terminal still earn.
+ *  - `unsupported-build` the agent is here, but this build has no recipe yet.
+ *
+ * Replaces the old `comingSoon` flag, which claimed a FEATURE was unbuilt when the truth was about
+ * the machine. The flag is gone rather than kept: it was a lie in the only place it ever fired, and
+ * a dead flag invites the next false badge.
+ */
+export type SurfaceBlockedReason =
+  | 'no-agent-cli'
+  | 'no-agent-editor'
+  /** Another tool holds Claude Code's file. Named when it is installed, described when it is not. */
+  | 'foreign-conflict'
+  /** The file is not what we verified and nothing in it says who changed it. We accuse nobody. */
+  | 'changed-unknown'
+  /** Our patch is in place on a build we have no verified original for: cannot check or undo it. */
+  | 'ours-unverified'
+  /** A target could not be read at all - permissions, or Claude Code is mid-update. */
+  | 'unreadable'
+  /** Genuinely clean bytes on a build not verified yet. The ONLY case "not supported yet" is true. */
+  | 'unsupported-build';
 
 export interface PanelSurface {
   id: string;
   active: boolean;
   available: boolean;
   consentGranted: boolean;
-  comingSoon: boolean;
+  blockedReason?: SurfaceBlockedReason | undefined;
   modifiesFiles: boolean;
   /** Earning rate relative to the status bar (1 = base). From the live rate card; undefined until known. */
   earnRate: number | undefined;
   /** True when Claude Code has been modified by another extension. */
   conflict?: boolean | undefined;
-  /** Display name of the other extension, when it can be resolved. */
+  /** Display name of the other extension, ONLY when it is actually installed here. */
   conflictVendor?: string | undefined;
+  /** Its extension id, so a step can open or remove THAT extension rather than a search result. */
+  conflictVendorId?: string | undefined;
+  /** Whether that extension is running, merely switched off, or gone. Drives both the copy and the
+   *  step's done-state: 'no' means the remove step is already satisfied. */
+  conflictVendorInstalled?: 'yes' | 'disabled' | 'removing' | 'no' | 'elsewhere' | 'unknown' | undefined;
+  /** Which other editor holds it, and that extension's own folder (home-relative, display only).
+   *  Set only with 'elsewhere', and the reason that state needs its own steps: nothing this window
+   *  can click removes an extension belonging to another application.
+   *  `pendingRemoval` means it was uninstalled there and that editor has not restarted, so it is
+   *  still loaded and still writing - a different sentence and a shorter list. */
+  conflictVendorHost?: { label: string; dir: string; pendingRemoval?: boolean } | undefined;
+  /**
+   * The developer removed Claude Code from inside the repair checklist and has not put it back.
+   *
+   * The one thing here that cannot be read off the disk: a machine with no Claude Code extension
+   * looks identical whether someone is half way through a repair or never installed it. Without
+   * this the checklist has to hand over to a different box with different numbering exactly when the
+   * developer does what it asked, which reads as the software losing its place.
+   */
+  repairing?: boolean | undefined;
+  /** Are Claude Code's files on DISK? Distinct from anyAgentEditor, which is the running window -
+   *  they disagree between a removal and the reload that applies it, and that gap is why the reload
+   *  is a step rather than a footnote. */
+  agentFilesPresent?: boolean | undefined;
+  /** Is it INSTALLED, as opposed to merely present on disk? A third fact again: an editor drops the
+   *  registry entry the instant you uninstall and deletes the folder only when the whole app
+   *  restarts, so between those moments Claude Code is uninstalled with its patched bytes intact. */
+  agentInstalled?: boolean | undefined;
+  /** The raw marker token found on disk (e.g. "VIBE-ADS"). A fact we can quote when the tool that
+   *  wrote it is no longer installed, so we can be specific without naming a vendor we cannot find. */
+  conflictToken?: string | undefined;
   /** True when a take-over can recover pristine from Awaitful-controlled sources. */
   canTakeOver?: boolean | undefined;
   /** False when this build has no recipe / no target (surface can't be offered here). */
   supported?: boolean | undefined;
   /** Active via a provisional self-recipe on a brand-new build, pending server confirmation. */
   provisional?: boolean | undefined;
+  /**
+   * Whether the surface is genuinely RENDERING, which is a separate axis from whether it is
+   * chosen. `active` is the radio (our bytes are on disk and this is the picked spot); this says
+   * whether anything has actually been seen on screen. Conflating them is what let the panel
+   * report a surface as earning while it showed nothing.
+   */
+  live?: 'unknown' | 'loaded' | 'live' | 'reload-needed' | 'not-rendering' | 'silent' | undefined;
 }
 
 export interface PanelState {
   /** Extension version, shown in fine print in the panel footer. */
   version: string;
+  /** What this editor calls itself (`vscode.env.appName`) - "Cursor", "Windsurf", "VS Codium". The
+   *  section header used to say "Visual Studio Code" to every one of them, which is wrong for most
+   *  of the editors this actually runs in. */
+  appName: string;
   signedIn: boolean;
   email: string | undefined;
+  /** Display name, shown in place of the email when set - falls back to email otherwise. */
+  name: string | undefined;
   earningsToday: string | undefined;
   /** Earned but not yet paid out (lifetime minus payouts). */
   unredeemedUsd: string | undefined;
   disabled: boolean;
+  /** True once the agent has thought at least once on this machine - the activation signal. Until it
+   *  is true (and the developer is signed in and not paused), the panel shows the "no agent activity
+   *  yet" hint, because a silent $0 is almost always "not actually running Claude Code here". */
+  everThoughtSeen: boolean;
+  /** At least one agent's own CLI is installed here. False means nothing can earn at all: no thinking
+   *  hook can fire, so the status bar, the terminal and both webview spots are equally dead. */
+  anyAgentCli: boolean;
+  /** At least one agent's VS Code extension is installed in this window. The two webview spots patch
+   *  that extension's bundle, so this gates them independently of anyAgentCli. */
+  anyAgentEditor: boolean;
+  /** No agent here, and clearing an older build's entries out of the agent's settings did not fully
+   *  succeed - so the panel must not claim we left them untouched. Mirrors pauseRestoreFailed. */
+  agentCleanupFailed: boolean;
   /** Paused, but the restore to pristine could not be confirmed, so we must not claim the editor is
    *  unmodified. */
   pauseRestoreFailed: boolean;
   /** Whether accrued earnings are shown in the VS Code status bar (idle state). */
   showEarningsInStatusBar: boolean;
+  /** Off (default): a surface preference set from the web dashboard only nudges - this device must
+   *  confirm here before any Claude Code file changes. On: it applies automatically, the same way it
+   *  already does when a surface is picked here - this device's own opt-in IS the consent. */
+  remoteControlAllowed: boolean;
   /** Set when an ad is currently showing in the status bar. */
   activeAdLine: string | undefined;
   /** Set when the showing ad is the zero-bid house fallback (bills nobody, pays nothing). */
   activeAdUnpaid: boolean;
   activeAdUrl: string | undefined;
-  /** Chosen chat-banner glow style id, the styles offered, and the shared @keyframes (for the live preview). */
-  chatBannerStyle: string;
-  chatBannerKeyframes: string;
-  chatBannerThemes: { id: string; label: string; swatch: string; background: string; animation: string }[];
-  /** Chosen outline frame ('banner' | 'full') and the frames offered. */
-  chatBannerFrame: string;
-  chatBannerFrames: { id: string; label: string }[];
-  /** Chosen ad spinner id and the gallery offered (frames animate in the Customize ad page). */
-  adSpinner: string;
-  adSpinners: { id: string; label: string; frames: string[]; intervalMs: number }[];
-  /** Whether the developer wants to see advertiser logos. Most ads carry none regardless. */
-  adBrandLogo: boolean;
+  /**
+   * How each ad format looks on this machine, keyed by format id: for every element that format
+   * draws, its label, its options, and the value in force. The panel renders straight from this and
+   * knows nothing about what a "spinner" or a "glow" is, so adding an element to the shared
+   * catalogue gives every format that declares it a working control with no change here.
+   *
+   * Replaced the account-wide `adSpinner` / `adBrandLogo` / `chatBanner*` fields: those said one
+   * spinner for four formats, which was never what the panel was actually storing.
+   */
+  customize: Record<string, ResolvedElement[]>;
+  /** The shared glow @keyframes/@property, injected once so a swatch preview animates for real. */
+  glowKeyframes: string;
   /** VS Code surfaces — exactly one active at a time. */
   vsSurfaces: PanelSurface[];
   terminalEnabled: boolean;
   terminalConsentGranted: boolean;
-  terminalComingSoon: boolean;
+  /** The terminal needs only the agent's CLI, never its VS Code extension, so 'no-agent-cli' is the
+   *  only reason it can be blocked. */
+  terminalBlockedReason?: 'no-agent-cli' | undefined;
   terminalEarnRate: number | undefined;
 }
 
@@ -67,20 +158,35 @@ export type PanelMessage =
   | { type: 'sign-in' }
   | { type: 'sign-out' }
   | { type: 'open-dashboard' }
-  | { type: 'set-ad-spinner'; id: string }
-  | { type: 'toggle-ad-logo' }
+  /** The ONE customization write. Four element-specific messages collapsed into it; the host
+   *  validates the (format, element, value) triple against the shared catalogue before storing. */
+  | { type: 'set-element'; format: string; element: string; value: string | boolean }
   | { type: 'set-surface'; id: string }
-  | { type: 'set-banner-style'; style: string }
-  | { type: 'set-banner-frame'; frame: string }
   | { type: 'consent-grant'; id: string; takeover?: boolean }
   | { type: 'toggle-terminal' }
   | { type: 'restore-files' }
-  | { type: 'reload-window' }
+  /** Carries where the panel was when it was clicked, so the reload can land back on that page.
+   *  Both fields are validated host-side against the known views and format ids - the webview says
+   *  where it WAS, it does not get to name an arbitrary destination. */
+  | { type: 'reload-window'; view?: string; detailId?: string }
   | { type: 'open-extensions'; query: string }
+  /** Open ONE extension's own page. The id is echoed back from what the host itself detected and
+   *  sent down, never composed in the webview - so this cannot be pointed at an arbitrary target. */
+  | { type: 'open-extension'; id: string }
+  /** Remove one extension, on an explicit click on a button that says so. Same id constraint. The
+   *  host never does this on its own initiative - see the conflict box's doc comment. */
+  | { type: 'uninstall-extension'; id: string; from?: string }
+  /** Install one extension (only ever the agent's own, to undo the uninstall a step above). */
+  | { type: 'install-extension'; id: string }
+  /** Carries no slug on purpose: the webview must not be able to steer openExternal at any path. */
+  | { type: 'open-setup-docs' }
+  /** Reveal the other editor's extensions folder. Carries no path, for the same reason. */
+  | { type: 'show-conflict-host' }
   | { type: 'open-github' }
   | { type: 'open-privacy' }
   | { type: 'toggle-enabled' }
   | { type: 'toggle-statusbar-earnings' }
+  | { type: 'toggle-remote-control' }
   | { type: 'visit-ad' };
 
 // ── Panel singleton ───────────────────────────────────────────────────────────
@@ -152,10 +258,11 @@ export class AwaitfulPanel {
     void this.panel.webview.postMessage({ type: 'state', state });
   }
 
-  /** Steer the open panel to a view ('ad' = the Customize ad page); used by commands and the
-   *  settings link, so every entrance lands on the same page with the same back button. */
-  navigate(view: string): void {
-    void this.panel.webview.postMessage({ type: 'navigate', view });
+  /** Steer the open panel to a view ('detail' = one format's own page, paired with detailId); used
+   *  by commands and the settings link, so every entrance lands on the same page with the same back
+   *  button. */
+  navigate(view: string, detailId?: string): void {
+    void this.panel.webview.postMessage({ type: 'navigate', view, detailId });
   }
 
   dispose(): void {
@@ -224,6 +331,8 @@ body.vscode-light{
   --active-border:oklch(29% 0.084 135);--active-bg:oklch(96% 0.06 134);
   --ring:oklch(52% 0.170 145 / 0.32);
   --warn:oklch(52% 0.140 58);
+  --warn-bg:oklch(52% 0.140 58 / 0.08);
+  --warn-edge:oklch(52% 0.140 58 / 0.28);
   --toggle-off:oklch(10% 0.004 135 / 0.18);
 }
 body.vscode-dark,body.vscode-high-contrast{
@@ -235,6 +344,8 @@ body.vscode-dark,body.vscode-high-contrast{
   --active-border:oklch(86% 0.171 134);--active-bg:oklch(86% 0.171 134 / 0.09);
   --ring:oklch(80% 0.190 140 / 0.36);
   --warn:oklch(80% 0.120 72);
+  --warn-bg:oklch(80% 0.120 72 / 0.11);
+  --warn-edge:oklch(80% 0.120 72 / 0.32);
   --toggle-off:oklch(86% 0.171 134 / 0.20);
 }
 /* fallback for unthemed body */
@@ -247,6 +358,8 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
   --active-border:oklch(86% 0.171 134);--active-bg:oklch(86% 0.171 134 / 0.09);
   --ring:oklch(80% 0.190 140 / 0.36);
   --warn:oklch(80% 0.120 72);
+  --warn-bg:oklch(80% 0.120 72 / 0.11);
+  --warn-edge:oklch(80% 0.120 72 / 0.32);
   --toggle-off:rgba(255,255,255,0.18);
 }
 
@@ -254,18 +367,39 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .panel{max-width:480px;margin:0 auto;padding:20px 16px 32px}
 
 /* ── Header ── */
-.header{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+/* Two full-width rows stacked, not one row beside a 2-line text column: that is what lets the
+   right-hand controls (the web-control toggle, the status-bar eye) land in the same x-position,
+   one directly under the other, instead of the bottom one trailing left of the top one. */
+.header{display:flex;flex-direction:column;gap:2px;margin-bottom:20px}
+.header-row{display:flex;align-items:center;gap:10px}
 .avatar{
   width:34px;height:34px;border-radius:50%;
   background:var(--brand);color:oklch(10% 0.004 135);
   display:flex;align-items:center;justify-content:center;
   font-weight:700;font-size:14px;flex-shrink:0;
 }
-.header-text{flex:1;min-width:0}
-.header-email{font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.header-sub{font-size:11px;color:var(--text-3);margin-top:1px}
-/* Eye toggle at the header's right edge: show/hide earnings in the status bar. */
-.eye-btn{margin-left:auto;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:none;border:none;padding:5px;border-radius:6px;color:var(--text-3);cursor:pointer;transition:color .12s,background .12s}
+/* Row 2 has no avatar - this spacer keeps its text lined up under the name above, not the avatar. */
+.header-spacer{width:34px;flex-shrink:0}
+.header-email{flex:1;min-width:0;font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.header-sub-text{flex:1;min-width:0;font-size:11px;color:var(--text-3);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.header-sub-eye{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.header-sub-eye .eye-btn{margin-left:0}
+/* Row 1, right edge: the account-wide "let the web dashboard control this device" switch - it lives
+   with the identity it governs, not buried between the surface cards it happens to affect. Shares
+   .hdr-toggle-label with the status-bar toggle below it. */
+.header-rc{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.hdr-toggle-label{font-size:11px;color:var(--text-2);white-space:nowrap}
+.toggle.sm{width:26px;height:16px}
+.toggle.sm::after{width:10px;height:10px;top:3px;left:3px}
+.toggle.sm.on::after{transform:translateX(10px)}
+.info-btn{position:relative;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:none;border:none;padding:3px;border-radius:6px;color:var(--text-3);cursor:pointer;transition:color .12s,background .12s}
+.info-btn::before{content:'';position:absolute;top:50%;left:50%;width:28px;height:28px;transform:translate(-50%,-50%)}
+.info-btn:hover{color:var(--text);background:var(--surface)}
+.info-btn:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px}
+.header-rc-note{font-size:11px;color:var(--text-3);line-height:1.5;margin:6px 0 14px}
+.eye-btn{position:relative;margin-left:auto;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:none;border:none;padding:5px;border-radius:6px;color:var(--text-3);cursor:pointer;transition:color .12s,background .12s}
+/* Extend the tap/click target to 40px without enlarging the visible button (dense desktop min). */
+.eye-btn::before{content:'';position:absolute;top:50%;left:50%;width:40px;height:40px;transform:translate(-50%,-50%)}
 .eye-btn:hover{color:var(--text);background:var(--surface)}
 .eye-btn:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px}
 
@@ -279,7 +413,7 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
   display:flex;align-items:center;justify-content:center;
   font-size:22px;margin:0 auto 12px;
 }
-.signin h3{font-size:15px;font-weight:600;margin-bottom:4px}
+.signin h3{font-size:15px;font-weight:600;margin-bottom:4px;text-wrap:balance}
 .signin p{font-size:12px;color:var(--text-2);margin-bottom:16px;line-height:1.5}
 
 /* ── Interactive illustration ── */
@@ -293,17 +427,30 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .hl.on{opacity:1}
 
 /* ── Privacy strip ── */
+/* The strongest thing this product can say about itself, so it is given room to say it: the mark
+   sits in its own tinted plate on the left and every line of copy runs in one column to its right.
+   It used to be a 14px glyph inline with the sentence, which read as a footnote. */
 .privacy{
-  display:flex;align-items:flex-start;gap:9px;
+  display:flex;align-items:flex-start;gap:12px;
   background:var(--surface);border:1px solid var(--border);
-  border-radius:8px;padding:10px 12px;margin-bottom:14px;
+  border-radius:10px;padding:13px 14px;margin-bottom:14px;
+  cursor:pointer;transition:border-color .12s,background .12s;
 }
-.privacy{cursor:pointer;transition:border-color .12s,background .12s}
 .privacy:hover{border-color:var(--brand-dark);background:var(--surface-2,var(--surface))}
 .privacy:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px}
-.privacy svg{flex-shrink:0;margin-top:1px;color:var(--brand-dark)}
-.privacy-text{font-size:11px;color:var(--text-2);line-height:1.55}
-.privacy-text strong{color:var(--text);font-weight:600}
+.privacy-mark{
+  flex-shrink:0;width:38px;height:38px;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+  background:color-mix(in oklab, var(--brand-dark) 10%, transparent);
+  color:var(--brand-dark);
+}
+.privacy-mark svg{width:21px;height:21px}
+.privacy-col{display:flex;flex-direction:column;gap:4px;min-width:0}
+.privacy-title{font-size:12.5px;font-weight:700;color:var(--text);letter-spacing:.005em}
+.privacy-text{font-size:11px;color:var(--text-2);line-height:1.55;text-wrap:pretty}
+/* The line that turns a reassurance into a next move. A shade stronger than the body, so the eye
+   lands on it after the promise rather than before it. */
+.privacy-do{font-size:11px;color:var(--text);line-height:1.55;text-wrap:pretty}
 .privacy-more{color:var(--brand-dark);font-weight:600;white-space:nowrap}
 
 /* ── "What leaves your machine" view ── */
@@ -342,25 +489,40 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
   cursor:pointer;transition:border-color 120ms,background 120ms,box-shadow 120ms;
   user-select:none;
 }
-.card:hover:not(.active):not(.soon){border-color:var(--border-strong)}
+.card:hover:not(.active):not(.blocked){border-color:var(--border-strong)}
 /* Selected surface: not a hard 1px outline but the site's focused-field treatment - the accent border
    plus a soft ring and a little depth, so it reads as chosen, not just bordered. */
-.card.active{border-color:var(--active-border);background:var(--active-bg);box-shadow:0 0 0 3px var(--ring),0 1px 4px rgba(0,0,0,.10);cursor:default}
-.card.soon{opacity:.55;cursor:default}
+.card.active{border-color:var(--active-border);background:var(--active-bg);box-shadow:0 0 0 3px var(--ring),0 1px 4px rgba(0,0,0,.10)}
+/* Cannot run on this machine (no agent, no editor extension, unsupported build). Inert, and faded -
+   but only its IDENTITY fades. The reason and its way out stay at full strength, because reading
+   them is the entire point of the state; a 55% explanation would be the silent dead end again in a
+   quieter font. (Opacity cannot be undone on a descendant, hence the per-element list.) */
+.card.blocked{cursor:default}
+.card.blocked .card-icon,
+.card.blocked .card-name-row,
+.card.blocked .card-desc,
+.card.blocked .card-meta{opacity:.55}
+.card.blocked:hover{border-color:var(--warn-edge)}
 /* Signed-out: the surface is visible but deactivated (faded) until sign-in. */
 .card.locked{opacity:.55}
 .lock{display:flex;align-items:center;justify-content:center;width:34px;color:var(--text-3)}
 .card-icon{width:28px;height:28px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;margin-top:1px}
 .card-body{flex:1;min-width:0}
 .card-name{font-size:13px;font-weight:600;color:var(--text)}
-.card-desc{font-size:11px;color:var(--text-2);margin-top:2px;line-height:1.4}
+.card-desc{font-size:11px;color:var(--text-2);margin-top:2px;line-height:1.4;text-wrap:pretty}
 .card-meta{display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap}
 .tag-mod{font-size:10px;color:var(--text-3);display:flex;align-items:center;gap:3px}
 .tag-mod svg{opacity:.6}
-.btn-learn{font-size:11px;color:var(--brand-dark);background:none;border:none;padding:0;cursor:pointer;text-decoration:underline;text-decoration-color:transparent;transition:text-decoration-color 100ms}
-.btn-learn:hover{text-decoration-color:currentColor}
 .card-action{flex-shrink:0;display:flex;align-items:center;margin-top:2px}
-.badge-soon{font-size:10px;color:var(--text-3);background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:2px 8px}
+.badge-blocked{font-size:10px;color:var(--text-3);background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:2px 8px}
+/* Why a card is blocked - same weight and rhythm as .card-conflict, since both answer "why can I
+   not pick this?" and both end in the way out. */
+.card-blocked{margin-top:6px;font-size:11px;line-height:1.4;color:var(--text-2);text-wrap:pretty}
+/* With a warning mark the text hangs beside it rather than wrapping under it - the same shape as the
+   conflict hint, so the two read as one class of problem. */
+.more-link{color:var(--brand-dark);font-weight:600;background:none;border:0;padding:0;font:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
+.more-link:hover{text-decoration:underline}
+.more-link:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px;border-radius:4px}
 
 /* ── Toggle ── */
 .toggle{
@@ -369,6 +531,9 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
   flex-shrink:0;
 }
 .toggle.on{background:var(--active-border)}
+/* Extend the switch's click target to 40px tall without changing its look; it sits alone at a row's
+   right edge, so the larger area never overlaps a neighbouring control. */
+.toggle::before{content:'';position:absolute;top:50%;left:50%;width:100%;min-width:40px;height:40px;transform:translate(-50%,-50%)}
 .toggle::after{
   content:'';width:14px;height:14px;background:#fff;border-radius:50%;
   position:absolute;top:3px;left:3px;transition:transform 180ms;
@@ -377,19 +542,29 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .toggle.on::after{transform:translateX(14px)}
 .toggle:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
 
-/* ── Radio (the VS Code surfaces are pick-one; the terminal keeps a switch = additive) ── */
-.radio{width:18px;height:18px;border-radius:50%;border:2px solid var(--border-strong);flex-shrink:0;position:relative;transition:border-color 150ms;background:transparent}
-.card.active .radio{border-color:var(--active-border)}
-.card.active .radio::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--active-border)}
-.card:hover:not(.active):not(.soon) .radio{border-color:var(--text-3)}
+/* ── Card action slot ──
+   Two glyphs, each doing one job: what the state IS, then the chevron saying this leads to the page
+   where it is changed. The state glyph differs by KIND, and that difference is the point - the three
+   VS Code formats are pick-one (a ring, filled when chosen), while the terminal runs alongside
+   whichever one you picked and so wears a switch. Giving the terminal the same ring would say it is
+   a fourth contender for a slot only one thing can hold, which is the opposite of what it does. */
+.pick{width:18px;height:18px;border-radius:50%;border:2px solid var(--border-strong);flex-shrink:0;position:relative;background:transparent;transition:border-color 150ms}
+.pick.on{border-color:var(--active-border)}
+.pick.on::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--active-border)}
+.card:hover .pick:not(.on){border-color:var(--text-3)}
+.card-go{display:flex;align-items:center;color:var(--text-3);transition:color 120ms,transform 120ms}
+.card:hover .card-go{color:var(--text-2);transform:translateX(2px)}
 .card:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
 
 /* ── Conflict hint on a card (a competitor changed Claude Code) ── */
-.card-conflict{display:flex;align-items:center;gap:5px;margin-top:6px;padding:0;border:0;background:none;font:inherit;font-size:11px;line-height:1.4;color:var(--text-2);text-align:left;cursor:pointer;width:100%}
-.card-conflict svg{flex-shrink:0;color:var(--warn,#d1832b)}
-.card-conflict .more{color:var(--brand-dark);font-weight:600;white-space:nowrap}
-.card-conflict:hover .more{text-decoration:underline}
-.card-conflict:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px;border-radius:4px}
+/* A blocked card is the one thing on this list a developer has to act on, and it used to whisper it
+   in the same grey as the description above. Same tinted callout the detail page gives the same
+   problem, so the two read as one thing seen at two zoom levels. Warn, not red: nothing here is
+   destructive or lost - it is stopped, and there is a way out. */
+.card-conflict{display:flex;align-items:flex-start;gap:6px;margin-top:7px;padding:6px 8px;font-size:11px;line-height:1.45;text-align:left;
+  color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-edge);border-radius:6px;text-wrap:pretty}
+.card-conflict svg{flex-shrink:0;margin-top:2px;color:var(--warn)}
+.card-conflict .more{color:var(--warn);font-weight:700;white-space:nowrap;text-decoration:underline}
 
 /* ── Divider ── */
 .div{height:1px;background:var(--border);margin:14px 0}
@@ -408,14 +583,71 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .back:hover{color:var(--text);border-color:var(--border-strong);background:var(--surface-2)}
 .back:focus-visible{outline:2px solid var(--brand-dark);outline-offset:2px}
 .back svg{flex-shrink:0;opacity:.9}
-.detail-title{font-size:17px;font-weight:700;margin-bottom:4px}
-.detail-desc{font-size:13px;color:var(--text-2);line-height:1.55;margin-bottom:16px}
+.detail-title{font-size:17px;font-weight:700;margin-bottom:4px;text-wrap:balance}
+/* Heading and its action on one line, the action flush with the illustration's right edge. */
+.detail-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:2px}
+.detail-head>.card-name-row{flex:1;min-width:0}
+.detail-head>.btn-primary{flex-shrink:0;margin-top:1px}
+.detail-head>.btn-primary:disabled{opacity:.55;cursor:default}
+.detail-desc{font-size:13px;color:var(--text-2);line-height:1.55;margin-bottom:16px;text-wrap:pretty}
 .info-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px}
 .info-box.conflict{border-color:oklch(70% 0.14 70 / .5);background:oklch(70% 0.14 70 / .08)}
-.conflict-text{font-size:12px;color:var(--text-2);line-height:1.55}
-.conflict-actions{display:flex;flex-direction:column;gap:9px;margin-top:11px}
-.conflict-step{display:flex;align-items:center;gap:9px}
-.conflict-step .num{flex-shrink:0;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--warn);color:var(--warn);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
+.conflict-text{font-size:12px;color:var(--text-2);line-height:1.55;text-wrap:pretty}
+/* ── The numbered rail ──
+   Geometry is taken from the dot itself, never from a fixed offset guess. Rows align to flex-start
+   so the dot's position cannot depend on how far its label wraps: under align-items:center a
+   two-line row pushed the dot down while the connector's top stayed where it was, which is why the
+   line rendered as a stub that never reached the next number. The connector now starts at the dot's
+   bottom edge (top:1.5em, the dot's own height) and runs to the bottom of the row's padding box -
+   and that padding IS the gap between rows, so it lands exactly on the next dot's top edge.
+   All em, against ONE font context set here on the container, so the rail tracks the panel's text
+   size and every child measures the same em. Anything that draws part of the rail must inherit that
+   size; a child with its own font-size would put its segment a fraction of a pixel off. */
+.conflict-actions{display:flex;flex-direction:column;margin-top:11px;font-size:12px}
+/* The spent-checklist actions: side by side, because neither is a step and neither comes first. */
+.stalled-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+/* An aside BETWEEN two steps. Indented to the label column with the rail carried through, because
+   full width broke the connector in half and left the steps below it reading as a second, unrelated
+   list that had lost its place in the first. */
+/* Indented to the label column - 1.5em of dot plus the .75em gap - and carrying the rail straight
+   through, so an aside between two steps does not cut the sequence in half. It sits INSIDE the same
+   column as the steps and inherits their font-size, which is what keeps its segment on the same
+   vertical line as theirs. */
+.step-note{position:relative;padding-left:2.25em;padding-bottom:.75em;color:var(--text-3);line-height:1.5;text-wrap:pretty}
+.step-note::before{content:'';position:absolute;left:calc(.75em - .75px);top:0;bottom:0;width:1.5px;background:var(--border-strong)}
+.step-note.after-done::before{background:var(--active-border)}
+/* The checklist failed. It used to say so in the same grey aside used for footnotes, directly under
+   a full row of ticks - so the one sentence that contradicted the ticks was the quietest thing in
+   the box. Same warn treatment the cards use for the same class of problem. */
+.stalled{display:flex;align-items:flex-start;gap:7px;margin-top:11px;padding:8px 9px;border-radius:6px;
+  font-size:11.5px;line-height:1.5;text-wrap:pretty;color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-edge)}
+.stalled svg{flex-shrink:0;margin-top:2px;color:var(--warn)}
+.stalled b{font-weight:700}
+.conflict-step{display:flex;align-items:flex-start;gap:.75em;position:relative;padding-bottom:.75em}
+/* The last row ends the rail, so it carries no trailing gap to draw one into. */
+.conflict-actions>*:last-child{padding-bottom:0}
+.conflict-step .num{flex-shrink:0;width:1.5em;height:1.5em;border-radius:50%;border:1.5px solid var(--warn);color:var(--warn);font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums;background:transparent;transition:background 160ms,border-color 160ms,color 160ms}
+.conflict-step .num svg{width:.83em;height:.83em}
+/* Done: filled, ticked, and the rail below it turns with it - so the list reads as progress rather
+   than as a static set of instructions. Derived from the world (the extension really is gone), never
+   from "a button was clicked", so it is equally right when the developer did it in VS Code's own
+   view or had already done it before opening this panel. */
+.conflict-step.done .num{background:var(--active-border);border-color:var(--active-border);color:var(--cta-text)}
+.conflict-step.done .lbl{color:var(--text-3)}
+/* The connector between one step and the next. Drawn from the step ABOVE, so its colour says
+   "everything up to here is done" rather than decorating a step not yet reached. */
+.conflict-step:not(:last-child)::before{content:'';position:absolute;left:calc(.75em - .75px);top:1.5em;bottom:0;width:1.5px;background:var(--border-strong)}
+.conflict-step.done:not(:last-child)::before{background:var(--active-border)}
+.conflict-manual{margin-top:11px}
+/* The manual path, unfolded. Sunk into the box rather than raised out of it: it is the alternative
+   route, not the recommended one, and it must not out-shout the numbered steps above it. */
+.manual-box{margin-top:9px;padding:10px 11px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
+.manual-box .conflict-step{margin-top:8px;padding-bottom:0}
+/* Marker, not a number: these open a page, they are not part of the count above. */
+.manual-box .num.open{border-color:var(--border-strong);color:var(--text-3)}
+.manual-box .conflict-step::before{display:none}
+.manual-box .lbl{color:var(--text-3)}
+@media (prefers-reduced-motion:reduce){.conflict-step .num{transition:none}}
 .conflict-step .lbl{flex:1;font-size:12px;color:var(--text-2);line-height:1.4}
 .conflict-act{flex-shrink:0;font-size:11.5px;font-weight:600;color:var(--brand-dark);background:none;border:1px solid var(--border-strong);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;transition:background 100ms}
 .conflict-act:hover{background:var(--surface-2)}
@@ -441,16 +673,16 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .bp-glow.f-banner{bottom:42px;padding:2px 2px 0 2px;border-radius:9px 9px 0 0}      /* rings the ad, open bottom */
 .bp-glow.f-full{left:-2px;right:-2px;bottom:-2px;padding:2px;border-radius:9px}       /* wraps ad + chat box */
 .bp-face{position:relative;z-index:1;display:flex;align-items:center;gap:6px;background:var(--surface-2);border-radius:7px 7px 0 0;padding:6px 11px;font-size:12px;overflow:hidden;white-space:nowrap}
-.bp-text{color:var(--text);text-decoration:underline;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .bp-timer{margin-left:auto;flex:0 0 auto;opacity:.55;font-variant-numeric:tabular-nums;color:var(--text-3)}
 .bp-box{position:relative;z-index:1;box-sizing:border-box;height:42px;background:var(--surface-2);border:1px solid var(--border);border-radius:0 0 7px 7px;display:flex;align-items:center;padding:0 11px}
 .bp-box span{font-size:12px;color:var(--text-3)}
 .bp-preview.is-full .bp-face{border-bottom:1px solid var(--border)}                    /* divider between ad + chat */
 .bp-preview.is-full .bp-box{border-color:transparent;border-top-color:var(--border)}   /* the glow is the outer edge */
-.bp-frame-row{display:flex;gap:6px;margin:2px 0 8px}
-.bp-frame{font-size:11px;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:4px 12px;cursor:pointer;transition:all 120ms}
 
-/* ── Customize ad: the brand-logo switch and its live example ── */
+/* ── Customize: one element's control, on a format's own page ── */
+.elem{margin-top:14px}
+.elem:first-of-type{margin-top:10px}
+.elem-head{margin-bottom:2px}
 .opt-row{display:flex;align-items:center;gap:12px}
 .opt-text{min-width:0}
 .opt-title{font-size:12px;color:var(--text)}
@@ -466,8 +698,11 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .ad-eg.off .ad-eg-logo{opacity:0;width:0;margin-right:-8px}
 .ad-eg-text{color:var(--text);text-decoration:underline;overflow:hidden;text-overflow:ellipsis;min-width:0}
 @media (prefers-reduced-motion:reduce){.ad-eg-logo{transition:none}}
+/* Inside the chat banner's mock the same line has no box of its own - the banner IS the box, and one
+   preview per page is the rule. Every format previews the ad line; only this one wraps it in chrome. */
+.bp-face .ad-eg{background:none;border:0;padding:0;margin:0;flex:1;min-width:0}
 
-/* ── Customize ad: the spinner gallery ── */
+/* ── Customize: the spinner gallery ── */
 .spin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:8px;margin-top:10px}
 .spin-tile{height:64px;display:flex;align-items:center;justify-content:center;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;cursor:pointer;padding:0;transition:border-color 120ms,background 120ms}
 .spin-tile:hover{border-color:var(--border-strong)}
@@ -475,8 +710,6 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .spin-tile.on{border-color:var(--active-border);background:var(--active-bg)}
 .spin-glyph{font-family:var(--vscode-editor-font-family,ui-monospace,'SF Mono',monospace);font-size:20px;color:var(--text)}
 .spin-tile.none .spin-glyph{opacity:.4;font-size:11px}
-.bp-frame:hover{border-color:var(--border-strong)}
-.bp-frame.on{color:var(--brand-dark);background:var(--active-bg);border-color:var(--active-border);font-weight:600}
 @media (prefers-reduced-motion:reduce){.bp-glow{animation:none!important}}
 .gh-btn{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--brand-dark);background:none;border:1px solid var(--border-strong);border-radius:6px;padding:8px 12px;cursor:pointer;width:100%;transition:background 100ms;margin-bottom:16px}
 .gh-btn:hover{background:var(--surface)}
@@ -498,6 +731,25 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .paused-text{font-size:12px;color:var(--text-2);line-height:1.5}
 .paused-text strong{color:var(--text);font-weight:600}
 .paused-banner .btn-primary{flex-shrink:0}
+/* The "no agent activity yet" hint: accent-tinted like the ad callout (informational and hopeful,
+   not an error), shown until the first thinking event lands. */
+.activate-note{background:var(--active-bg);border:1px solid var(--active-border);border-radius:10px;padding:12px 14px;margin-bottom:16px}
+.activate-text{font-size:12px;color:var(--text-2);line-height:1.5}
+.activate-text strong{color:var(--text);font-weight:600}
+/* The "no agent found" block: the same accent-tinted, non-alarming treatment, plus an action - this
+   one is a dead end the developer can actually walk out of, so it carries the way out. */
+.agent-note{display:flex;align-items:center;gap:12px;background:var(--active-bg);border:1px solid var(--active-border);border-radius:10px;padding:12px 14px;margin-bottom:16px}
+.agent-text{flex:1;font-size:12px;color:var(--text-2);line-height:1.5;text-wrap:pretty}
+.agent-text strong{color:var(--text);font-weight:600}
+.agent-note .btn-primary{flex-shrink:0;white-space:nowrap}
+
+/* ── Tactile press: a subtle 0.96 scale on the panel's buttons. Every property is listed explicitly
+   (never transition:all), and the scale is dropped under reduced-motion. ── */
+.btn-primary,.btn-visit,.gh-btn,.back,.btn-ghost,.conflict-act{transition:transform 110ms cubic-bezier(.2,0,0,1),opacity 100ms,border-color 100ms,background 100ms,color 100ms}
+.btn-primary:active,.btn-visit:active,.gh-btn:active,.back:active,.btn-ghost:active,.conflict-act:active{transform:scale(.96)}
+@media (prefers-reduced-motion:reduce){
+  .btn-primary:active,.btn-visit:active,.gh-btn:active,.back:active,.btn-ghost:active,.conflict-act:active{transform:none}
+}
 `;
 
 // ── Interactive VS Code Illustration ─────────────────────────────────────────
@@ -604,13 +856,13 @@ const ILLUSTRATION = `<svg viewBox="0 0 400 225" xmlns="http://www.w3.org/2000/s
     <line x1="238" y1="217.5" x2="302" y2="217.5" stroke="oklch(86% 0.171 134)" stroke-width="1" stroke-dasharray="3 2"/>
   </g>
 
-  <!-- Thinking-line highlight -->
+  <!-- Thinking line highlight -->
   <g id="hl-thinking-line" class="hl">
     <rect x="218" y="149" width="182" height="16" rx="2" fill="oklch(86% 0.171 134)" opacity=".12"/>
     <circle cx="232" cy="157" r="5" fill="none" stroke="oklch(86% 0.171 134)" stroke-width="1.8" stroke-dasharray="12 8"/>
     <rect x="242" y="153" width="100" height="8" rx="3" fill="oklch(86% 0.171 134)" opacity=".65"/>
     <rect x="108" y="149" width="100" height="16" rx="3" fill="oklch(86% 0.171 134)"/>
-    <text x="158" y="160.5" text-anchor="middle" font-size="9" font-weight="600" fill="oklch(10% 0.004 135)">Thinking-line</text>
+    <text x="158" y="160.5" text-anchor="middle" font-size="9" font-weight="600" fill="oklch(10% 0.004 135)">Thinking line</text>
     <line x1="208" y1="157" x2="226" y2="157" stroke="oklch(86% 0.171 134)" stroke-width="1" stroke-dasharray="3 2"/>
   </g>
 
@@ -638,6 +890,11 @@ const ILLUSTRATION = `<svg viewBox="0 0 400 225" xmlns="http://www.w3.org/2000/s
 </svg>`;
 
 // ── Client-side JavaScript ────────────────────────────────────────────────────
+//
+// Everything below is ONE template literal, so two rules apply to every line including comments:
+// no backtick may appear (it closes the string, and tsc reports it as a stray TS1005 on whatever
+// line follows, which reads nothing like the real cause), and ${...} would interpolate. Write
+// 'quoted' or plain prose in comments here, never `code style`.
 
 const JS = `
 'use strict';
@@ -649,15 +906,20 @@ const TL_FILES = [
   { path: 'claude-code / webview/index.js', why: 'Shows the sponsored line in place of the thinking spinner.' },
   { path: 'claude-code / extension.js', why: 'Lets the line confirm it was actually shown, over localhost only - so earnings are never counted unless the ad was really visible.' },
 ];
+// The agent's own extension id. A constant here, never built from state, so the two "Show Claude
+// Code" steps cannot be steered anywhere else.
+const CLAUDE_CODE_EXT_ID = 'anthropic.claude-code';
 const META = {
   'status-bar':   { icon:'◉', label:'Status bar',       desc:'A single sponsored line at the right end of the status bar, only while your agent thinks.', mod:false },
   'chat-banner':  { icon:'▣', label:'Chat banner',      desc:'A sponsored banner above the chat input while the agent thinks. Disappears when the response starts.', mod:true, files: TL_FILES, ghPath:'src/patch' },
-  'thinking-line':{ icon:'≡', label:'Thinking-line',    desc:'Replaces the spinner verb while the agent thinks. Subtle and unobtrusive.', mod:true, files: TL_FILES, ghPath:'src/patch' },
+  'thinking-line':{ icon:'≡', label:'Thinking line',    desc:'Replaces the spinner verb while the agent thinks. Subtle and unobtrusive.', mod:true, files: TL_FILES, ghPath:'src/patch' },
 };
 
 let state = JSON.parse(document.getElementById('initial-state').textContent);
 let hovered = null;  // currently hovered surface id
-let spinCells = [];  // animating tiles on the Customize ad page; rebuilt per render
+let spinCells = [];  // animating glyphs on a format's page (tiles + preview); rebuilt per render
+let rcInfoOpen = false;  // "what does Control from web do" note, expanded via the header's (i) button
+let manualOpen = false;  // the conflict box's "do it yourself" alternative path
 
 // ── State application ──────────────────────────────────────────────────────
 function render() {
@@ -666,11 +928,6 @@ function render() {
 
   root.innerHTML = '';
   spinCells = [];
-
-  if (state._view === 'ad') {
-    root.appendChild(buildAdView());
-    return;
-  }
 
   if (state._view === 'detail') {
     root.appendChild(buildDetailView(state._detailId));
@@ -687,21 +944,53 @@ function render() {
   // Header or sign-in
   if (signed) {
     const header = el('div', 'header');
+    const displayName = (state.name && state.name.trim()) || state.email || '';
+
+    // Row 1: avatar + name/email, and the account-wide "let the web dashboard control this device"
+    // switch — off by default. Even on, every safety step (backup, atomic write, verify, fail-safe)
+    // still runs exactly as it does when a surface is picked here; this only decides whether that
+    // path needs a click here first, or the web's own request applies straight away.
+    const row1 = el('div', 'header-row');
     const av = el('div', 'avatar');
-    av.textContent = (state.email || '?')[0].toUpperCase();
-    const ht = el('div', 'header-text');
-    const he = el('div', 'header-email'); he.textContent = state.email || '';
-    const hs = el('div', 'header-sub');
+    av.textContent = (displayName || '?')[0].toUpperCase();
+    const he = el('div', 'header-email'); he.textContent = displayName;
+    const rc = el('div', 'header-rc');
+    const rcLabel = el('span', 'hdr-toggle-label'); rcLabel.textContent = 'Control from web';
+    const rcOn = !!state.remoteControlAllowed;
+    const rcInfo = el('button', 'info-btn');
+    rcInfo.setAttribute('aria-label', 'What does this control?');
+    rcInfo.setAttribute('aria-expanded', rcInfoOpen ? 'true' : 'false');
+    rcInfo.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round"><circle cx="8" cy="8" r="6.3" stroke-width="1.3"/><line x1="8" y1="5" x2="8" y2="5" stroke-width="1.7"/><line x1="8" y1="7.3" x2="8" y2="11" stroke-width="1.3"/></svg>';
+    rcInfo.onclick = () => { rcInfoOpen = !rcInfoOpen; render(); };
+    const rcToggle = el('button', 'toggle sm');
+    if (rcOn) rcToggle.classList.add('on');
+    rcToggle.setAttribute('role', 'switch');
+    rcToggle.setAttribute('aria-checked', rcOn ? 'true' : 'false');
+    rcToggle.setAttribute('aria-label', 'Let the web dashboard control this device');
+    rcToggle.onclick = () => send('toggle-remote-control');
+    // Info before the toggle: the switch is the actionable control, so it sits rightmost.
+    rc.append(rcLabel, rcInfo, rcToggle);
+    row1.append(av, he, rc);
+
+    // Row 2: the earnings figure (or fallback line), lined up under the name via a spacer the same
+    // width as the avatar, and "Earning in status bar" + its toggle - a full-width row of its own
+    // (not nested inside row 1's text column) so this toggle lands directly under the one above it.
+    const row2 = el('div', 'header-row');
+    const spacer = el('div', 'header-spacer');
+    const hsText = el('span', 'header-sub-text');
     if (state.unredeemedUsd !== undefined || state.earningsToday !== undefined) {
       const parts = [];
       if (state.unredeemedUsd !== undefined) parts.push(fmtUsd(state.unredeemedUsd) + ' unredeemed');
       if (state.earningsToday !== undefined) parts.push(fmtUsd(state.earningsToday) + ' today');
-      hs.textContent = parts.join(' · ');
+      hsText.textContent = parts.join(' · ');
     } else {
-      hs.textContent = 'Earning while your AI agent thinks';
+      hsText.textContent = 'Earning while your AI agent thinks';
     }
-    ht.append(he, hs);
-    // Eye toggle (right edge): show/hide accrued earnings in the status bar (a privacy preference).
+    // Eye toggle: show/hide accrued earnings in the status bar (a device-local privacy preference —
+    // e.g. hiding a dollar figure on a machine used for screen-sharing, unlike the account-wide
+    // switch on row 1).
+    const hsEye = el('span', 'header-sub-eye');
+    const eyeLabel = el('span', 'hdr-toggle-label'); eyeLabel.textContent = 'Earning in status bar';
     const eye = el('button', 'eye-btn');
     const shown = state.showEarningsInStatusBar;
     eye.title = shown ? 'Earnings shown in the status bar - click to hide' : 'Earnings hidden from the status bar - click to show';
@@ -710,8 +999,17 @@ function render() {
       ? '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2.1"/></svg>'
       : '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z" opacity=".45"/><circle cx="8" cy="8" r="2.1" opacity=".45"/><line x1="2.5" y1="2.5" x2="13.5" y2="13.5"/></svg>';
     eye.onclick = () => send('toggle-statusbar-earnings');
-    header.append(av, ht, eye);
+    hsEye.append(eyeLabel, eye);
+    row2.append(spacer, hsText, hsEye);
+
+    header.append(row1, row2);
     panel.append(header);
+
+    if (rcInfoOpen) {
+      const rcNote = el('div', 'header-rc-note');
+      rcNote.textContent = 'Off: a change from the dashboard needs your OK here first. On: it applies automatically. Either way, every file it touches is still backed up, verified, and safe to undo.';
+      panel.append(rcNote);
+    }
   } else {
     panel.append(buildSignIn());
   }
@@ -728,6 +1026,38 @@ function render() {
     const rb = el('button', 'btn-primary'); rb.textContent = 'Resume'; rb.onclick = () => send('toggle-enabled');
     pb.append(pt, rb);
     panel.append(pb);
+  }
+
+  // No agent at all: nothing here can produce a thinking event, so nothing can earn - the silent $0
+  // this panel used to hide entirely. Persistent by design: NOT behind the everThought latch, which
+  // was the flaw (it latches on the first hook, so on the machine that needs this message it never
+  // fires, and everywhere else it vanishes for good). Shown signed in or out, since the missing
+  // dependency is worth knowing before signing up. Suppressed while paused, where the paused banner
+  // is already the answer.
+  if (!state.anyAgentCli && !state.disabled) {
+    const nb = el('div', 'agent-note');
+    const nt = el('div', 'agent-text');
+    // "written nothing into Claude Code's settings" is a claim about the disk, so it may only be
+    // made when the cleanup confirmed it - the same honesty gate as pauseRestoreFailed above.
+    nt.innerHTML = state.agentCleanupFailed
+      ? "<strong>No agent found.</strong> Awaitful earns while Claude Code thinks, and we cannot find Claude Code on this machine, so nothing is earning. We could not finish clearing an older Awaitful entry from ~/.claude/settings.json - open that file if you want it gone. Install Claude Code and run it once, then reopen this panel."
+      : "<strong>No agent found.</strong> Awaitful earns while Claude Code thinks, and we cannot find Claude Code on this machine, so nothing is earning. Awaitful has written nothing into Claude Code's settings. Install Claude Code and run it once, then reopen this panel.";
+    const sb = el('button', 'btn-primary');
+    sb.textContent = 'Set up Claude Code';
+    sb.onclick = () => send('open-setup-docs');
+    nb.append(nt, sb);
+    panel.append(nb);
+  }
+
+  // A CLI IS here but has never thought: a different problem with a different fix. Almost always the
+  // developer is prompting through a different agent (Cursor's, Copilot) rather than Claude Code.
+  // The "Claude Code is missing" half this note used to carry is now the persistent block above.
+  if (signed && !state.disabled && state.anyAgentCli && !state.everThoughtSeen) {
+    const nb = el('div', 'activate-note');
+    const nt = el('div', 'activate-text');
+    nt.innerHTML = "<strong>No agent activity yet.</strong> Claude Code is installed here, but we have not seen it think. Awaitful earns from Claude Code specifically, so make sure you're prompting through it, not your editor's built-in agent. Your line appears the moment it starts working.";
+    nb.append(nt);
+    panel.append(nb);
   }
 
   // Privacy reassurance — the trust anchor for the default choice.
@@ -757,30 +1087,28 @@ function render() {
   // Sync highlights
   updateHighlight(getDefaultHighlight());
 
-  // VS Code surfaces
-  const sect1 = el('div', 'sect'); sect1.textContent = 'Visual Studio Code';
-  const sub1 = el('div', 'sect-sub'); sub1.textContent = 'One active surface at a time';
+  // VS Code ad formats
+  const sect1 = el('div', 'sect'); sect1.textContent = state.appName || 'Visual Studio Code';
+  const sub1 = el('div', 'sect-sub'); sub1.textContent = 'One active format at a time · Open one to turn it on and style it';
   panel.append(sect1, sub1);
 
-  const group = el('div', 'radiogroup');
-  group.setAttribute('role', 'radiogroup');
-  group.setAttribute('aria-label', 'Ad placement in Visual Studio Code');
+  const group = el('div');
   const ids = ['status-bar', 'thinking-line', 'chat-banner'];
-  let conflictShown = false;
   for (const id of ids) {
-    const sv = (state.vsSurfaces || []).find(s => s.id === id) || { id, active:false, available:false, consentGranted:false, comingSoon:true, modifiesFiles:false };
-    // The webview surfaces share one Claude Code patch, so a conflict is a single shared problem with
-    // a single fix - show the hint on the first conflicted card only, never once per surface.
-    const showConflict = !!sv.conflict && !conflictShown;
-    if (showConflict) conflictShown = true;
-    group.append(buildCard(sv, showConflict));
+    const sv = (state.vsSurfaces || []).find(s => s.id === id) || { id, active:false, available:false, consentGranted:false, blockedReason:'no-agent-cli', modifiesFiles:false };
+    // EVERY affected card says so. This used to show on the first conflicted card only, on the
+    // grounds that the two webview formats share one patch and so share one fix - but the developer
+    // reading the chat banner's card is not told to look at the thinking line's, so the second card
+    // simply looked fine while being just as blocked. One shared cause is not one shared card.
+    // (A blocked card still renders its own reason instead, which is more specific.)
+    group.append(buildCard(sv, !!sv.conflict && !sv.blockedReason));
   }
   panel.append(group);
 
   // Terminal
   const div1 = el('div', 'div');
   const sect2 = el('div', 'sect'); sect2.textContent = 'Terminal';
-  const sub2 = el('div', 'sect-sub'); sub2.textContent = 'Stacks on top of your VS Code earnings - run both · Works in any terminal';
+  const sub2 = el('div', 'sect-sub'); sub2.textContent = 'Stacks on top of your editor format - run both · Works in any terminal';
   panel.append(div1, sect2, sub2);
   panel.append(buildTerminalCard());
 
@@ -788,11 +1116,10 @@ function render() {
   const div2 = el('div', 'div');
   const footer = el('div', 'footer');
   const btnDash = el('button', 'btn-ghost'); btnDash.textContent = 'View earnings'; btnDash.onclick = () => send('open-dashboard');
-  const btnSpin = el('button', 'btn-ghost'); btnSpin.textContent = 'Customize ad'; btnSpin.onclick = () => { state._view = 'ad'; render(); };
   const btnToggle = el('button', 'btn-ghost'); btnToggle.textContent = state.disabled ? 'Resume earning' : 'Pause earning'; btnToggle.onclick = () => send('toggle-enabled');
   const btnOut = el('button', 'btn-ghost'); btnOut.textContent = 'Sign out'; btnOut.onclick = () => send('sign-out');
-  if (!signed) { btnDash.disabled = true; btnSpin.disabled = true; btnToggle.disabled = true; btnOut.textContent = 'Sign in'; btnOut.onclick = () => send('sign-in'); }
-  footer.append(btnDash, btnSpin, btnToggle, btnOut);
+  if (!signed) { btnDash.disabled = true; btnToggle.disabled = true; btnOut.textContent = 'Sign in'; btnOut.onclick = () => send('sign-in'); }
+  footer.append(btnDash, btnToggle, btnOut);
   panel.append(div2, footer);
 
   // Fine print — version + source link.
@@ -821,10 +1148,33 @@ function buildPrivacyStrip() {
   p.setAttribute('role', 'button');
   p.setAttribute('tabindex', '0');
   p.title = 'See exactly what leaves your machine';
-  p.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0l6 2.5v4.2c0 3.9-2.6 7.4-6 8.8-3.4-1.4-6-4.9-6-8.8V2.5L8 0z" opacity=".25"/><path d="M6.9 10.2L4.7 8l.9-.9 1.3 1.3 3.5-3.5.9.9-4.4 4.4z"/></svg>';
+  const mark = el('div', 'privacy-mark');
+  mark.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0l6 2.5v4.2c0 3.9-2.6 7.4-6 8.8-3.4-1.4-6-4.9-6-8.8V2.5L8 0z" opacity=".25"/><path d="M6.9 10.2L4.7 8l.9-.9 1.3 1.3 3.5-3.5.9.9-4.4 4.4z"/></svg>';
+
+  const col = el('div', 'privacy-col');
+  const title = el('div', 'privacy-title');
+  title.textContent = 'Private by design';
+
+  /**
+   * "The default Status bar format modifies nothing" used to end this paragraph, and it quietly did
+   * the opposite of its job: naming one format as the safe one invites the reader to assume the
+   * others are a privacy trade. They are not - the promise is identical across all four. Whether a
+   * format edits a file is a different question from what Awaitful can SEE, and it is answered in
+   * full on each format's own page, so the guarantee is stated once here, for everything.
+   */
   const t = el('div', 'privacy-text');
-  t.innerHTML = '<strong>Private by design.</strong> Awaitful never reads your code, prompts, or agent output - it only detects that your agent is thinking, and for how long. The default Status bar surface modifies nothing. <span class="privacy-more">What leaves your machine →</span>';
-  p.append(t);
+  t.textContent = 'Awaitful never reads your code, your prompts, or what your agent writes. '
+    + 'It sees only that an agent is thinking, and for how long. That is the same on every format.';
+
+  const doIt = el('div', 'privacy-do');
+  doIt.textContent = 'Pick where your sponsored line appears below. Change it or switch it off '
+    + 'whenever you like, and anything a format touched is put back.';
+
+  const more = el('div', 'privacy-text');
+  more.innerHTML = '<span class="privacy-more">What leaves your machine →</span>';
+
+  col.append(title, t, doIt, more);
+  p.append(mark, col);
   const open = () => { state._view = 'privacy'; render(); };
   p.onclick = open;
   p.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
@@ -844,7 +1194,7 @@ function buildPrivacyView() {
   panel.append(title, desc);
 
   const sends = [
-    ['Which surface to show an ad on', 'The placement name (status bar, chat banner, …) and optional coarse hints like hour-of-day - off unless you enable them.'],
+    ['Which ad format to show', 'The format name (status bar, chat banner, …) and optional coarse hints like hour-of-day - off unless you enable them.'],
     ['Ad events', 'A random event id, the event type, which ad/slate it was, the placement, a timestamp, and how many milliseconds the line was actually visible. That’s the most specific thing Awaitful learns.'],
     ['Patch-health report (patch mode only)', 'SHA-256 hashes of Claude Code’s OWN shipped files plus the applied/failed outcome - used to recognise a known-good build. Never your content; a wrong hash only makes us refuse to patch.'],
     ['Account reads', 'Read-only: your email and earnings, so the panel can show whose account is earning. A device token can never move money or change campaigns.'],
@@ -888,8 +1238,12 @@ function buildPrivacyView() {
 
 // Earning chip — value comes from the server's live rate card, never hardcoded here. Hidden until the
 // rate card has been fetched. The label says "earnings" so a new user reads it as money, not speed: the
-// status bar is "Base earnings", others are "N× earnings", and the additive terminal is "+N× earnings".
+// status bar is "1× base earnings", others are "N× earnings", and the additive terminal is "+N× earnings".
 // Always anchored to the base (status-bar) rate, so the number never shifts when the user switches.
+//
+// The base chip carries its 1× rather than reading "Base earnings" on its own. Every other chip leads
+// with a multiplier, so a wordy one broke the column a reader scans down and left them working out
+// what the baseline was worth against a 2× beside it. Saying 1× makes the comparison immediate.
 function rateChip(rate, additive) {
   if (rate === undefined || rate === null) return null;
   const base = rate === 1 && !additive;
@@ -897,10 +1251,10 @@ function rateChip(rate, additive) {
   chip.textContent = additive
     ? '+' + rate + '× earnings'
     : base
-      ? 'Base earnings'
+      ? '1× base earnings'
       : rate + '× earnings';
   chip.title = additive
-    ? 'Runs alongside your VS Code placement and earns about ' + rate + '× the base rate on top of it.'
+    ? 'Runs alongside your editor format and earns about ' + rate + '× the base rate on top of it.'
     : base
       ? 'The baseline earnings - every other placement earns a multiple of this.'
       : 'Earns about ' + rate + '× what the status bar earns. Set by the live rate card, and can change over time.';
@@ -916,51 +1270,39 @@ function lockGlyph() {
   return lock;
 }
 
+/**
+ * The one-line amber warning a card shows when something has stopped this format, and the way in.
+ *
+ * Deliberately NOT a button. The whole card opens the page, so a nested control would be a second
+ * target for one action - and the developer would have to aim at four small words instead of the
+ * box their eye already landed on.
+ */
+function cardWarning(line) {
+  const w = el('div', 'card-conflict');
+  w.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6 15 14H1L8 1.6z"/><path d="M8 6.4v3.1M8 11.6h.01"/></svg>';
+  w.appendChild(text(line + ' '));
+  const more = el('span', 'more'); more.textContent = 'Fix it \u2192';
+  w.appendChild(more);
+  return w;
+}
+
 function buildCard(sv, showConflict) {
   const m = META[sv.id] || {};
-  const locked = !state.signedIn && !sv.comingSoon;
+  // Blocked outranks locked: "sign in to activate" is the wrong next step for a surface that cannot
+  // run on this machine at all.
+  const blocked = !!sv.blockedReason;
+  const locked = !state.signedIn && !blocked;
   const active = sv.active && !locked;
-  const conflict = !!showConflict && !locked;
+  const conflict = !!showConflict && !locked && !blocked;
   const card = el('div', 'card');
   if (active) card.classList.add('active');
-  if (sv.comingSoon) card.classList.add('soon');
+  if (blocked) card.classList.add('blocked');
   if (locked) { card.classList.add('locked'); card.title = 'Sign in to activate'; }
 
-  // Each of the three VS Code surfaces is a radio inside the pick-one radiogroup (the card is the
-  // radio). Selecting one switches away from the others; status-bar activates directly, a webview
-  // surface opens its detail page (consent, or the fix when a competitor changed Claude Code).
-  card.setAttribute('role', 'radio');
-  card.setAttribute('aria-checked', active ? 'true' : 'false');
-  if (sv.comingSoon) card.setAttribute('aria-disabled', 'true');
-  // An explicit name, so the radio announces as "<surface>, <rate>" instead of the concatenation of
-  // every descendant text (which would sweep in the description and the inner Learn more / Fix it buttons).
-  const ratePhrase = sv.earnRate === 1 ? 'base earning rate' : sv.earnRate ? 'about ' + sv.earnRate + ' times the base rate' : '';
-  card.setAttribute('aria-label', (m.label || sv.id) + (ratePhrase ? ', ' + ratePhrase : ''));
-  const choose = () => {
-    if (locked) { send('sign-in'); return; }
-    if (sv.comingSoon || sv.active) return;
-    handleEnable(sv);
-  };
-  if (!sv.comingSoon) {
-    // Every selectable radio is focusable, INCLUDING the checked one, so a keyboard/screen-reader user
-    // can land on the current selection and hear "checked". Arrow keys roam focus within the group.
-    card.tabIndex = 0;
-    card.onclick = choose;
-    card.onkeydown = (e) => {
-      // Only the card's OWN keys act. Enter/Space bubbling up from the inner buttons (Learn more,
-      // Fix it) must NOT be hijacked into a surface switch - let their native activation run.
-      if (e.target !== card) return;
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); return; }
-      if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-        e.preventDefault();
-        const dir = (e.key === 'ArrowDown' || e.key === 'ArrowRight') ? 1 : -1;
-        const radios = card.parentElement ? Array.prototype.slice.call(card.parentElement.querySelectorAll('.card')) : [];
-        for (let i = radios.indexOf(card) + dir; i >= 0 && i < radios.length; i += dir) {
-          if (radios[i] && radios[i].tabIndex === 0) { radios[i].focus(); break; }
-        }
-      }
-    };
-  }
+  // Every card opens its own page - the one place a format is turned on, turned off, and styled.
+  // The status bar used to activate on click while the other two opened a page, so the same gesture
+  // meant two different things and the status bar had nowhere to put its own settings.
+  cardOpens(card, sv.id, { blocked, locked, active, label: m.label || sv.id, rate: sv.earnRate });
 
   // Highlight illustration on hover
   card.addEventListener('mouseenter', () => { hovered = sv.id; updateHighlight(sv.id); });
@@ -984,54 +1326,161 @@ function buildCard(sv, showConflict) {
   } else {
     meta.append(safeTag('Does not modify Claude Code'));
   }
-  if (!locked) {
-    const learn = el('button', 'btn-learn'); learn.textContent = 'Learn more →';
-    learn.onclick = (e) => { e.stopPropagation(); openDetail(sv.id); };
-    meta.append(learn);
-  }
   body.append(meta);
 
-  // Conflict hint: a competitor changed Claude Code, so this surface needs a clean copy first.
-  // Surfaced on the card so the block is visible without opening the detail page; the fix lives there.
+  // Conflict hint: a competitor changed Claude Code, so this format needs a clean copy first.
+  // Surfaced on the card so the block is visible without opening the page; the fix lives there, and
+  // the card itself is the way in - so this is plain text now, not a second button to the same place.
   if (conflict) {
-    const who = sv.conflictVendor || 'another extension';
-    const cf = el('button', 'card-conflict');
-    cf.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6 15 14H1L8 1.6z"/><path d="M8 6.4v3.1M8 11.6h.01"/></svg>';
-    cf.appendChild(text('Changed by ' + who + ', needs a clean copy. '));
-    const more = el('span', 'more'); more.textContent = 'Fix it →'; cf.appendChild(more);
-    cf.onclick = (e) => { e.stopPropagation(); openDetail(sv.id); };
-    body.append(cf);
+    body.append(cardWarning('Changed by ' + (sv.conflictVendor || 'another extension') + ', needs a clean copy.'));
+  }
+
+  // Render honesty for the CHOSEN surface: our bytes being on disk is not proof anything appeared.
+  // Never claim a line is showing without a beacon that says it was painted.
+  if (!blocked && active && sv.live && sv.live !== 'live') {
+    const ln = el('div', 'card-blocked');
+    if (sv.live === 'reload-needed') {
+      ln.appendChild(text("Claude Code's panel is running an older version of Awaitful's change. Reload the window. "));
+      const a = el('button', 'more-link'); a.textContent = 'Reload window →';
+      a.onclick = (e) => { e.stopPropagation(); reloadHere(); };
+      ln.appendChild(a);
+    } else if (sv.live === 'not-rendering') {
+      ln.appendChild(text("Applied, but nothing appeared in Claude Code's panel in the last 3 thinking turns, so earning moved to your status bar. Reloading the window usually fixes it. "));
+      const a = el('button', 'more-link'); a.textContent = 'Reload window →';
+      a.onclick = (e) => { e.stopPropagation(); reloadHere(); };
+      ln.appendChild(a);
+    } else if (sv.live === 'silent') {
+      // Three causes, none of which we can tell apart from here. Name them; assert none.
+      ln.appendChild(text("Applied, but Claude Code's panel has not reported back in the last 3 thinking turns, so earning moved to your status bar. That happens when the panel is closed, off screen, or being driven from another window."));
+    } else {
+      ln.appendChild(text("Applied. It confirms itself the next time Claude Code's panel is open and thinking."));
+    }
+    body.append(ln);
+  }
+
+  // The real reason, in the body where there is room for a sentence. The badge in the action slot
+  // only has room for a word.
+  if (blocked) {
+    // Every stopped format speaks with one voice: the amber callout, one line, and the way in. It is
+    // the same problem at two zoom levels as the box on the page behind it, so it should not look
+    // like a different class of thing depending on which reason stopped it.
+    const fixable = {
+      'no-agent-cli': 'Claude Code is not installed on this machine.',
+      'no-agent-editor': 'Claude Code is not installed in this window.',
+      'changed-unknown': "Claude Code's file was changed by something, and nothing says what.",
+    }[sv.blockedReason];
+
+    if (sv.blockedReason === 'foreign-conflict') {
+      // Named only when that extension is really installed. Otherwise describe what is on disk and
+      // quote the marker - specific without asserting a vendor we cannot find.
+      body.append(cardWarning(sv.conflictVendor
+        ? 'Changed by ' + sv.conflictVendor + ', needs a clean copy.'
+        : sv.conflictToken
+          ? 'Changed by another tool (marked ' + sv.conflictToken + '), needs a clean copy.'
+          : 'Changed by another tool, needs a clean copy.'));
+    } else if (fixable) {
+      body.append(cardWarning(fixable));
+    } else {
+      // No fix to point at, so no way in either - a link to a page with nothing on it is worse than
+      // a sentence that says so plainly.
+      const nb = el('div', 'card-blocked');
+      nb.appendChild(text(sv.blockedReason === 'ours-unverified'
+        ? "Awaitful's change is in place, but it has no verified copy of this Claude Code version's original files, so it cannot check the change or undo it automatically. Reinstalling Claude Code restores a clean copy."
+        : sv.blockedReason === 'unreadable'
+          ? "Awaitful could not read one of Claude Code's files, so it changed nothing. That usually means Claude Code is mid-update, or the extensions folder is not readable. Reload the window and try again."
+          : 'Not supported on this Claude Code version yet. It turns on by itself when support lands, and your status bar keeps earning meanwhile.'));
+      body.append(nb);
+    }
   }
 
   const action = el('div', 'card-action');
-  if (sv.comingSoon) {
-    const b = el('span', 'badge-soon'); b.textContent = 'Coming soon';
+  if (blocked) {
+    const b = el('span', 'badge-blocked');
+    // "Paused" means we could run here and chose not to yet. "Unavailable" means this machine
+    // cannot run it at all. Never the same word for both.
+    b.textContent = (sv.blockedReason === 'unsupported-build' || sv.blockedReason === 'foreign-conflict'
+      || sv.blockedReason === 'changed-unknown' || sv.blockedReason === 'ours-unverified')
+      ? 'Paused' : 'Unavailable';
     action.append(b);
   } else if (locked) {
     action.append(lockGlyph());
   } else {
-    // Radio dot: filled + ringed when this surface is the current pick.
-    const radio = el('span', 'radio');
+    // A "not confirmed" note sits BESIDE the active dot, never instead of it: whether a format is on
+    // is the user's choice, while liveness is a separate fact about what is on screen. Merging the
+    // two would make a chosen format look unchosen.
+    if (active && sv.live && sv.live !== 'live' && sv.live !== 'unknown') {
+      const b = el('span', 'badge-blocked');
+      b.textContent = sv.live === 'reload-needed' ? 'Reload'
+        : sv.live === 'not-rendering' ? 'Not showing'
+        : 'Not confirmed';
+      action.append(b);
+    }
     if (active && sv.provisional) card.title = 'Running on a new Claude Code version - confirming it automatically. You are earning normally.';
-    action.append(radio);
+    action.append(pickGlyph(active), goChevron());
   }
 
   card.append(icon, body, action);
   return card;
 }
 
+/** Pick-one ring, filled when this is the chosen VS Code format. Decorative: the card's own
+ *  aria-label already says "active", so a screen reader hears it once rather than twice. */
+function pickGlyph(on) {
+  const d = el('span', 'pick');
+  if (on) d.classList.add('on');
+  d.setAttribute('aria-hidden', 'true');
+  return d;
+}
+
+/** Chevron: this card leads somewhere. Shown wherever the dot is not, so the slot is never empty. */
+function goChevron() {
+  const g = el('span', 'card-go');
+  g.setAttribute('aria-hidden', 'true');
+  g.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.25 10.75 8 6 12.75"/></svg>';
+  return g;
+}
+
+/**
+ * Make a card open its format's page. One definition for all four, so the gesture cannot mean
+ * something different on one of them - which is exactly what it used to do.
+ *
+ * Signed out, the click asks for sign-in instead: the page behind it is about turning a format on,
+ * and that is not the next step yet. Blocked, nothing is clickable at all - "sign in to activate" and
+ * "open the page" are both the wrong next step for a format that cannot run on this machine.
+ */
+function cardOpens(card, id, o) {
+  // A stopped card opens its page too. It used to be inert, on the reasoning that "open the page" is
+  // not the next step for a format that cannot run - but that page now carries the whole fix, so it
+  // is exactly the next step. Nothing here activates anything: the page's own button does that, and
+  // it withholds itself while the format is blocked.
+  const act = o.locked ? () => send('sign-in') : () => openDetail(id);
+  // An explicit name, or the button announces as every descendant's text concatenated - the
+  // description and the inner links swept in with it.
+  const ratePhrase = o.rate === 1 ? 'base earning rate' : o.rate ? 'about ' + o.rate + ' times the base rate' : '';
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label', o.label + (o.active ? ', active' : '') + (ratePhrase ? ', ' + ratePhrase : ''));
+  if (o.active) card.setAttribute('aria-current', 'true');
+  card.tabIndex = 0;
+  card.onclick = act;
+  card.onkeydown = (e) => {
+    // Only the card's OWN keys act. Enter/Space bubbling up from an inner link must not be hijacked.
+    if (e.target !== card) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); }
+  };
+}
+
 function buildTerminalCard() {
-  const sv = { id: 'terminal', active: false, comingSoon: state.terminalComingSoon };
-  const locked = !state.signedIn && !sv.comingSoon;
-  const m = { icon: '>_', label: 'Terminal status line', desc: 'A sponsored line in Claude Code’s status line while it’s thinking. Runs alongside your VS Code surface.', mod: true, file: '~/.claude/settings.json', ghPath: 'src/hooks/statusLineScript.ts' };
+  const sv = { id: 'terminal', active: false, blockedReason: state.terminalBlockedReason };
+  const blocked = !!sv.blockedReason;
+  const locked = !state.signedIn && !blocked;
+  const m = { icon: '>_', label: 'Terminal status line', desc: 'A sponsored line in Claude Code’s status line while it’s thinking. Runs alongside whichever format you picked in the editor.', mod: true, file: '~/.claude/settings.json', ghPath: 'src/hooks/statusLineScript.ts' };
 
   const card = el('div', 'card');
-  if (sv.comingSoon) card.classList.add('soon');
-  if (locked) {
-    card.classList.add('locked');
-    card.title = 'Sign in to activate';
-    card.onclick = () => send('sign-in');
-  }
+  const active = !!state.terminalEnabled && !locked && !blocked;
+  if (active) card.classList.add('active');
+  if (blocked) card.classList.add('blocked');
+  if (locked) { card.classList.add('locked'); card.title = 'Sign in to activate'; }
+  cardOpens(card, 'terminal', { blocked, locked, active, label: m.label, rate: state.terminalEarnRate });
   card.addEventListener('mouseenter', () => { hovered = 'terminal'; updateHighlight('terminal'); });
   card.addEventListener('mouseleave', () => { hovered = null; updateHighlight(getDefaultHighlight()); });
 
@@ -1047,33 +1496,44 @@ function buildTerminalCard() {
   const meta = el('div', 'card-meta');
   const tag = el('span', 'tag-mod'); tag.textContent = '⚙ Modifies settings.json';
   meta.append(tag);
-  if (!locked) {
-    const learn = el('button', 'btn-learn'); learn.textContent = 'Learn more →';
-    learn.onclick = (e) => { e.stopPropagation(); openDetail('terminal'); };
-    meta.append(learn);
-  }
   body.append(nameRow, desc, meta);
 
+  // Needs only the CLI, never the VS Code extension - worth saying, because it is the one surface a
+  // terminal-first developer can run when the two webview spots cannot.
+  if (blocked) {
+    const nb = el('div', 'card-blocked');
+    nb.appendChild(text('The status line lives inside Claude Code, which is not installed here. It works in any terminal once Claude Code is - you do not need the Claude Code extension for this one. '));
+    const a = el('button', 'more-link'); a.textContent = 'Set up Claude Code →';
+    a.onclick = (e) => { e.stopPropagation(); send('open-setup-docs'); };
+    nb.appendChild(a);
+    body.append(nb);
+  }
+
   const action = el('div', 'card-action');
-  if (sv.comingSoon) {
-    const b = el('span', 'badge-soon'); b.textContent = 'Coming soon';
+  if (blocked) {
+    // No control at all, not a disabled one: a switch here is exactly what let a developer flip a
+    // format that could never render and be told it worked.
+    const b = el('span', 'badge-blocked'); b.textContent = 'Unavailable';
     action.append(b);
   } else if (locked) {
     action.append(lockGlyph());
   } else {
+    // A SWITCH, never the pick-one ring the three VS Code formats wear. The terminal is not a fourth
+    // contender for a slot only one thing can hold: it runs alongside whichever one you picked, in
+    // every terminal you open. A ring here would say the opposite.
     const toggle = el('button', 'toggle');
-    if (state.terminalEnabled) toggle.classList.add('on');
+    if (active) toggle.classList.add('on');
     toggle.setAttribute('role', 'switch');
-    toggle.setAttribute('aria-checked', state.terminalEnabled ? 'true' : 'false');
-    toggle.setAttribute('aria-label', 'Terminal status line');
-    // Like the file-modifying VS Code surfaces: turning it ON opens the detail page (review the
-    // settings.json change, then enable); turning it OFF disables + restores your status line.
+    toggle.setAttribute('aria-checked', active ? 'true' : 'false');
+    toggle.setAttribute('aria-label', m.label);
+    // Off is immediate; on opens the page first, because turning it on writes to settings.json and
+    // that change is reviewed before it happens - the same rule the file-modifying formats follow.
     toggle.onclick = (e) => {
       e.stopPropagation();
       if (state.terminalEnabled) send('toggle-terminal');
       else openDetail('terminal');
     };
-    action.append(toggle);
+    action.append(toggle, goChevron());
   }
 
   card.append(icon, body, action);
@@ -1107,6 +1567,69 @@ function backButton() {
   return b;
 }
 
+/** Heading on the left, the page's one primary action on the right - aligned with the illustration
+ *  above it, so the decision sits where the eye already is rather than past every explanation. */
+function detailHead(titleRow, action) {
+  if (!action) return titleRow;
+  const row = el('div', 'detail-head');
+  row.append(titleRow, action);
+  return row;
+}
+
+/**
+ * The one thing a format's page is for: turning it on. At the TOP, beside the heading and aligned
+ * with the illustration's right edge - it used to sit past the styling controls, the file
+ * disclosure and the backup notes, which is a long way to scroll for the only decision on the page.
+ *
+ * Returns null where turning it on is not the next step: a blocked format (its guidance box owns
+ * the conversation), a contested file (the take-over shortcut owns it), or the terminal once it is
+ * already running, whose only remaining action is destructive and belongs in the footer.
+ */
+/**
+ * Does the repair box own this page, instead of the activate button?
+ *
+ * The latch alone is not enough, and trusting it was the bug. It means "Claude Code was taken off as
+ * part of a fix", which stays true after the fix has WORKED - so a finished repair kept the box up,
+ * drawing steps for a conflict that no longer existed ("remove the other extension" with nothing
+ * left to remove), and kept the activate button hidden behind them. The developer had done
+ * everything asked and had no way to turn the format on.
+ *
+ * Ownership is a fact about the world, never a memory: a contested file, or a repair whose Claude
+ * Code has not come back yet. Once it is back and the bytes are clean there is nothing to guide, and
+ * whether the surface is actually painting is the liveness note's job - which is measured rather
+ * than remembered.
+ */
+function repairBoxNeeded(sv) {
+  return !!sv.conflict || (!!sv.repairing && sv.agentFilesPresent === false);
+}
+
+function detailPrimary(id, sv, m) {
+  if (sv.blockedReason) return null;
+  const label = m.label || id;
+  const b = el('button', 'btn-primary');
+
+  if (sv.active) {
+    b.textContent = 'Showing now';
+    b.disabled = true;
+    return b;
+  }
+  if (id === 'terminal') {
+    b.textContent = 'Turn on';
+    b.onclick = () => { send('toggle-terminal'); state._view = 'surfaces'; render(); };
+    return b;
+  }
+  if (id === 'status-bar') {
+    b.textContent = 'Turn on';
+    b.onclick = () => { send('set-surface', { id: 'status-bar' }); state._view = 'surfaces'; render(); };
+    return b;
+  }
+  if (repairBoxNeeded(sv)) return null;   // the repair box carries the way forward instead
+  b.textContent = 'Turn on';
+  b.title = 'Turn on ' + label;
+  b.onclick = () => { send('consent-grant', { id }); state._view = 'surfaces'; render(); };
+  return b;
+}
+
 // Status bar modifies nothing, so its detail page is deliberately simpler than the patch surfaces':
 // the shared illustration (highlighting the status bar), what it is, a one-tap activate, and a plain
 // "No file changes" reassurance. No consent gate, no file disclosure, no restore/reload.
@@ -1127,32 +1650,585 @@ function buildStatusBarDetail() {
   const chip = rateChip(sv.earnRate);
   if (chip) titleRow.append(chip);
   const desc = el('div', 'detail-desc'); desc.textContent = m.desc;
-  panel.append(titleRow, desc);
+  panel.append(detailHead(titleRow, detailPrimary('status-bar', sv, m)), desc);
+
+  const cz = buildCustomize('status-bar');
+  if (cz) panel.append(cz);
 
   const footer = el('div', 'detail-footer');
   const left = el('div', 'detail-footer-l');
   left.append(safeTag('No file changes'));
-  const right = el('div', 'detail-footer-r');
-  const cancel = el('button', 'btn-ghost'); cancel.textContent = 'Cancel'; cancel.onclick = () => { state._view = 'surfaces'; render(); };
-  right.append(cancel);
-  const enableBtn = el('button', 'btn-primary');
-  if (sv.active) {
-    enableBtn.textContent = 'Showing in status bar';
-    enableBtn.disabled = true;
-  } else {
-    enableBtn.textContent = 'Show in status bar';
-    enableBtn.onclick = () => { send('set-surface', { id: 'status-bar' }); state._view = 'surfaces'; render(); };
-  }
-  right.append(enableBtn);
-  footer.append(left, right);
+  footer.append(left, el('div', 'detail-footer-r'));
   panel.append(footer);
   return panel;
+}
+
+/**
+ * One numbered step in a fix, with its own button. Shared by every guidance box, so a second one
+ * cannot quietly grow a different rail, a different tick, or a step that does nothing when clicked.
+ */
+/**
+ * Reload, and come back to this page.
+ *
+ * A reload is a real step in several flows here, and the window used to come back with the panel
+ * closed - so the developer had to find their way back to the format they were half way through
+ * setting up, with no sign that anything had progressed. Every reload button goes through this, so
+ * a new one cannot forget.
+ */
+function reloadHere() {
+  send('reload-window', { view: state._view || 'surfaces', detailId: state._detailId });
+}
+
+function stepRow(actions, text, opts) {
+  const o = opts || {};
+  const row = el('div', 'conflict-step');
+  if (o.done) row.classList.add('done');
+  const num = el('span', 'num');
+  // A tick, not a number, once it is done - what is left to do is the useful count.
+  if (o.done) num.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg>';
+  else num.textContent = String(o.n);
+  const lbl = el('span', 'lbl'); lbl.textContent = text;
+  row.append(num, lbl);
+  if (o.btn && !o.done) {
+    const b = el('button', 'conflict-act');
+    b.textContent = o.btn;
+    b.onclick = o.onClick;
+    row.append(b);
+  }
+  actions.append(row);
+  return row;
+}
+
+/**
+ * The do-it-yourself route, folded away until asked for.
+ *
+ * Every button in here only OPENS a page - same destinations as the numbered steps, none of the
+ * actions. That is the whole difference between the two paths, and the reason someone would pick
+ * this one: it is a fair thing to want an ad extension not to press buttons for you.
+ */
+function manualSection(rows) {
+  const wrap = el('div', 'conflict-manual');
+  const toggle = el('button', 'more-link');
+  toggle.textContent = manualOpen ? 'Hide \u25b4' : 'Or do it yourself \u25be';
+  toggle.setAttribute('aria-expanded', manualOpen ? 'true' : 'false');
+  toggle.onclick = () => { manualOpen = !manualOpen; render(); };
+  wrap.append(toggle);
+  if (!manualOpen) return wrap;
+
+  const box = el('div', 'manual-box');
+  const note = el('div', 'file-why');
+  note.textContent = 'These only open the page. Nothing is removed or installed for you.';
+  box.append(note);
+  for (const r of rows) {
+    const row = el('div', 'conflict-step');
+    // An open-arrow marker where a numbered step has its digit: same rhythm and alignment, while
+    // saying these are not part of the count - every one of them only opens a page.
+    const mark = el('span', 'num open');
+    mark.innerHTML = '<svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>';
+    const lbl = el('span', 'lbl'); lbl.textContent = r[1];
+    const b = el('button', 'conflict-act'); b.textContent = r[0]; b.onclick = r[2];
+    row.append(mark, lbl, b);
+    box.append(row);
+  }
+  wrap.append(box);
+  return wrap;
+}
+
+/**
+ * Why this format cannot run, and the exact sequence out of it - as a checklist that fills in as
+ * each step really lands, not a wall of instructions.
+ *
+ * ── What Awaitful does and does not do here ──────────────────────────────────────
+ *
+ * The remove buttons run VS Code's own uninstall, on an explicit click on a button that says
+ * exactly that. Awaitful still never removes or disables anything on its own initiative, and never
+ * touches another extension's code - the distinction that matters is UNILATERAL versus REQUESTED,
+ * and every one of these is requested. Nothing here is chained or automatic: one click, one step.
+ *
+ * ── Progress is derived, never remembered ───────────────────────────────────────
+ *
+ * A step is done because the world says so, not because a button was pressed. "Remove the other
+ * extension" ticks when it is genuinely no longer on disk, which the host re-reads on every
+ * extension change - so the list fills in live, and it is equally right if the developer did it
+ * themselves in the Extensions view, or did it before ever opening this panel.
+ *
+ * The Claude Code steps have no tick of their own on purpose: the moment its file is pristine again
+ * this entire box disappears, which is a more honest completion signal than a green circle.
+ *
+ * ── Heading copy is conditional on evidence ─────────────────────────────────────
+ *
+ * "Was modified by another extension" may only be said when a foreign marker or a named vendor was
+ * actually found. In the unknown states it could equally be a partial update or a hand edit, and
+ * blaming an extension would send the developer hunting for one that may not exist. It never says
+ * "already modified" either - that reads as though Awaitful did it.
+ */
+/**
+ * The repair worked, and one reload is left.
+ *
+ * Not the conflict box. Installing Claude Code makes it present immediately, so tearing the guidance
+ * away on that event would lose the reload step before it could be clicked - the requirement this
+ * state exists for. But keeping the CONFLICT box for it was worse: it drew a checklist for a
+ * conflict that no longer existed, told the developer to remove an extension that was already gone,
+ * and offered to restore a file that was already clean. Nothing here is wrong, so nothing here is
+ * warn-coloured, and the activate button stays on the page beside it.
+ */
+function buildRepairDoneBox(m) {
+  const box = el('div', 'info-box');
+  const lbl = el('div', 'info-label');
+  lbl.textContent = 'Almost there';
+  const t = el('div', 'conflict-text');
+  t.textContent = 'Claude Code’s file is clean again. Reload the window to finish, and '
+    + (m.label || 'this format') + ' will show its line.';
+  const acts = el('div', 'stalled-acts');
+  const b = el('button', 'conflict-act');
+  b.textContent = 'Reload window';
+  b.onclick = () => reloadHere();
+  acts.append(b);
+  box.append(lbl, t, acts);
+  return box;
+}
+
+function buildConflictBox(id, sv, m) {
+  const named = sv.conflictVendor;                       // on disk, so safe to name
+  const vendorState = sv.conflictVendorInstalled;
+  const attributable = !!(named || sv.conflictToken);    // a real foreign fingerprint was found
+  const who = named || 'Another extension';
+  const whoLow = named || 'the other extension';
+  const label = m.label || id;
+  const appLabel = state.appName || 'the editor';
+  const vhost = sv.conflictVendorHost;
+  const hostName = (vhost && vhost.label) || 'another editor';
+  const hostPending = !!(vhost && vhost.pendingRemoval);
+
+  // Two different facts, and the gap between them is the whole reason a reload is a step rather than
+  // a footnote. One is the DISK: VS Code marked the extension removed. The other is the running
+  // window, which keeps the old extension loaded - still drawing its status bar item, still
+  // clickable - until a reload. Only a reload closes that gap.
+  const filesGone = sv.agentFilesPresent === false;
+  const hostHasEditor = state.anyAgentEditor !== false;
+  const removalPending = filesGone && hostHasEditor;
+  const agentInstalled = sv.agentInstalled !== false;
+  /**
+   * Uninstalled, with its patched bytes still on disk.
+   *
+   * THE DEFECT THIS FIELD EXISTS FOR. An editor drops the registry entry the instant you uninstall
+   * and deletes the folder only when the whole app restarts - so "Remove Claude Code" leaves the
+   * changed file exactly where it was. installedBack read the surviving file as proof Claude Code
+   * had been put back, so the last three steps ticked the moment Remove was clicked, having achieved
+   * nothing at all, and the box then reported that the steps had not held. They had not been taken.
+   */
+  const filesStale = !agentInstalled && !filesGone;
+  // Claude Code has been put back during this repair - so a competitor that is ALSO back is about to
+  // undo it, and the developer is one reload from the top of this list again. Keyed on the registry,
+  // never on the bytes: a folder awaiting deletion is not an install.
+  const installedBack = sv.repairing === true && agentInstalled;
+
+  const box = el('div', 'info-box conflict');
+  const clbl = el('div', 'info-label');
+  // ONE heading for the whole repair. It used to change as the state moved underneath, so a
+  // developer who did exactly what step two asked watched the box become a different box.
+  clbl.textContent = attributable
+    ? 'Claude Code was modified by another extension'
+    : 'Claude Code was modified outside Awaitful';
+  box.append(clbl);
+
+  const lead = el('div', 'conflict-text');
+  if (filesGone && sv.repairing) {
+    // "Removed" is a claim about something the developer just did HERE. Said on a machine that
+    // simply never had Claude Code, it describes a repair nobody started - which is exactly what a
+    // stale latch produced on a fresh install.
+    lead.textContent = 'Claude Code is removed, so the changed file went with it. Finish the steps below to put a clean copy back.';
+  } else if (filesGone) {
+    lead.textContent = 'Claude Code is not installed here, so there is no file to attach to. The steps below put a clean copy in place.';
+  } else if (vendorState === 'elsewhere') {
+    // The state that made the checklist unwinnable. From this window the tool looks uninstalled, so
+    // every step said "removed" and the file kept changing back. Naming the application is the whole
+    // remedy: the fix is not in this list, it is in that one.
+    lead.textContent = hostPending
+      // Uninstalled over there, and STILL RUNNING - because an editor keeps an uninstalled extension
+      // loaded until it restarts. Without this the developer does the right thing, watches the file
+      // change back, and reasonably concludes the instructions were wrong.
+      ? who + ' is uninstalled in ' + hostName + ', but ' + hostName + ' has not restarted since - so it '
+        + 'is still loaded there and still changing this file. An editor keeps an uninstalled extension '
+        + 'running until it starts again.'
+      : who + ' is not installed in this window, but a copy in ' + hostName
+        + ' is. An extension there can change the same Claude Code files this window uses, so removing it here does not stop it.';
+  } else if (vendorState === 'removing') {
+    // Uninstalled here and STILL RUNNING. The editor drops the registry entry at once and keeps the
+    // code alive until the window reloads, so the developer clicks Remove, watches the file change
+    // back, and reasonably concludes the button did nothing.
+    lead.textContent = who + ' is uninstalled, but it is still running in this window until you '
+      + 'reload - and it puts its change straight back while it runs.';
+  } else if (vendorState === 'disabled') {
+    // Switched off is not gone, and saying so is the point: the developer already acted, and being
+    // told the file is still contested without being told why reads as the fix not working.
+    lead.textContent = who + ' is switched off, but the change it already made is still in Claude Code\u2019s file - turning a tool off never undoes what it wrote.';
+  } else if (vendorState === 'no' && attributable) {
+    lead.textContent = 'The extension that changed Claude Code is gone, but its change is still in the file - removing a tool never undoes what it wrote.';
+  } else {
+    lead.textContent = (attributable ? who + ' changed' : 'Something changed')
+      + ' Claude Code\u2019s files, so Awaitful has stopped showing its line rather than have two sponsored lines appear.';
+    if (!attributable) {
+      lead.textContent += ' Nothing in the file says what changed it, so this could be another tool, a partial update, or a hand edit.';
+    }
+  }
+  box.append(lead);
+
+  // The loop, named. A tool that re-applies its change on a timer will re-patch a fresh Claude Code
+  // within a minute of it appearing, so finishing the reinstall while it is running just returns the
+  // developer to the top of this list - which is exactly what it looks like from the outside.
+  if (vendorState === 'yes' && installedBack) {
+    const loop = el('div', 'conflict-text');
+    loop.style.marginTop = '9px';
+    loop.textContent = who + ' is installed and running again, and re-applies its change by itself. '
+      + 'Claude Code will not stay clean until it is removed, however many times you reinstall it.';
+    box.append(loop);
+  }
+
+  // The one-click shortcut, when a verified original is recoverable from an Awaitful-controlled
+  // source. An ADDITION to the box, never a replacement rendering: it used to return early with its
+  // own copy and no button, and the box changed shape the moment it appeared or vanished.
+  // Not offered once the file is gone - restoring bytes into nothing is an offer we cannot keep.
+  const actions = el('div', 'conflict-actions');
+  const step = (text, opts) => stepRow(actions, text, opts);
+
+  /**
+   * How far the repair has got, as ONE number.
+   *
+   * Each step used to read its own fact, which let progress run BACKWARDS: reinstalling Claude Code
+   * makes the files present again, so "Remove Claude Code" and the reload after it both un-ticked
+   * the moment the developer completed the step after them. A checklist that loses ticks is worse
+   * than one that renumbers.
+   *
+   * A later phase implies every earlier one, because it cannot be reached any other way - so this is
+   * a single ladder, and a step is done when the ladder has passed it.
+   */
+  const phase = installedBack ? 3
+    : (!agentInstalled && filesGone && !hostHasEditor) ? 2
+      : !agentInstalled ? 1
+        : 0;
+  const reached = (at) => phase >= at;
+
+  /**
+   * The competitor step reads the LIVE world, never the ladder.
+   *
+   * Monotonic progress is right for the Claude Code steps, because reinstalling it genuinely makes
+   * the files present again and un-ticking "remove it" would be progress running backwards. It is
+   * WRONG here: nothing later in this list puts the other extension back, so if it is present again
+   * the work really was undone, and a tick that survives that is the checklist lying. Reinstalling
+   * Claude Code was ticking step one on a machine where the competitor had returned.
+   */
+  // Uninstalled counts as removed the moment the registry drops it, which is the instant the button
+  // is clicked. It used to wait for 'no' - the extension gone from the running window too - so the
+  // step sat undone until a reload and the click looked like it had failed.
+  const vendorClear = vendorState === 'no' || vendorState === 'removing';
+  // ...but the RELOAD is only done when it has actually stopped running. These two used to tick
+  // together, on the reasoning that a swept folder proved a restart. The registry is faster than
+  // that: it drops the entry immediately, so tying them together would have ticked the reload the
+  // developer still has to do.
+  const vendorStopped = vendorState === 'no';
+
+  // FIXED numbering, never a count of what is left. A developer working down a list needs step two
+  // to still be step two after step one is done; renumbering under them is the same disorientation
+  // as the list disappearing, just quieter.
+  let n = 0;
+  const next = () => ++n;
+
+  const gone = vendorClear;
+  const removeText = gone
+    ? (named ? named + ' is removed.' : 'The other extension is removed.')
+    : vendorState === 'removing'
+      ? 'Remove ' + whoLow + '.'
+    : filesGone
+      ? 'Remove the other extension, if it is still installed.'
+      : vendorState === 'disabled'
+        ? 'Remove ' + whoLow + '. Switching it off is not enough - it can still be turned back on.'
+        : 'Remove ' + whoLow + ' so it stops changing the files.';
+  const removeStep = {
+    done: gone,
+    btn: sv.conflictVendorId ? 'Remove ' + who : 'Show extensions',
+    onClick: sv.conflictVendorId
+      ? () => send('uninstall-extension', { id: sv.conflictVendorId, from: id })
+      : () => send('open-extensions', { query: '@installed' }),
+  };
+
+  /**
+   * With a verified-clean original of our own, the whole repair is two steps - remove the other tool,
+   * then put the file back. Reinstalling Claude Code is the long way round, and only needed when we
+   * have no original to write.
+   *
+   * The removal is not optional and is not a footnote. A tool that re-patches on every load simply
+   * undoes the restore within seconds; the engine reclaims a bounded number of times and then yields,
+   * so offering the restore as a shortcut ON ITS OWN was offering something that could not hold. It
+   * is step two now, behind the removal that makes it stick.
+   */
+  if (vendorState === 'elsewhere') {
+    /**
+     * Its own list, because not one step of the ordinary repair applies.
+     *
+     * There is nothing to remove here, so no button on this page can end it; reinstalling Claude
+     * Code only hands the other editor a fresh file to change. The steps have to leave this
+     * application, and none of them can be ticked from here - we cannot see another editor's
+     * windows, and a tick we cannot justify is worse than a step that waits.
+     */
+    // Already uninstalled over there, so that step is spent - what remains is the restart, which is
+    // the part an editor does not tell you about.
+    if (!hostPending) {
+      step('Open ' + hostName + ' and uninstall ' + whoLow + ' there, or delete its folder.', {
+        n: next(), btn: 'Show the folder', onClick: () => send('show-conflict-host'),
+      });
+    }
+    step('Quit ' + hostName + ' and open it again. Uninstalling does not take effect until it '
+      + 'restarts, and until then it keeps putting its change back.', hostPending
+      ? { n: next(), btn: 'Show the folder', onClick: () => send('show-conflict-host') }
+      : { n: next() });
+    step('Come back here and reload this window.', {
+      n: next(), btn: 'Reload window', onClick: () => reloadHere(),
+    });
+    if (sv.canTakeOver) {
+      step('If this box is still here afterwards, put Claude Code’s original file back.', {
+        n: next(), btn: 'Restore original & enable',
+        onClick: () => { send('consent-grant', { id, takeover: true }); state._view = 'surfaces'; render(); },
+      });
+    }
+    box.append(actions);
+    if (vhost && vhost.dir) {
+      const where = el('div', 'file-why');
+      where.style.marginTop = '9px';
+      // The folder itself, because deleting it is the one route that does not depend on that
+      // editor's own uninstall doing what it says.
+      where.textContent = 'Its folder is ' + vhost.dir + '.';
+      box.append(where);
+    }
+  } else if (sv.canTakeOver && !filesGone) {
+    step(removeText, { n: next(), ...removeStep });
+    step(gone
+      ? 'Put Claude Code\u2019s original file back and turn on ' + label + '.'
+      : 'Then put Claude Code\u2019s original file back. Doing this first would only be undone.', {
+      n: next(),
+      btn: 'Restore original & enable',
+      onClick: () => { send('consent-grant', { id, takeover: true }); state._view = 'surfaces'; render(); },
+    });
+    const why = el('div', 'file-why');
+    why.textContent = 'Awaitful has a copy of this Claude Code version\u2019s genuine original, verified byte-for-byte, so nothing needs reinstalling.';
+    why.style.marginTop = '9px';
+    box.append(actions, why);
+  } else {
+    // No verified original to write, so the file has to come back from Claude Code itself.
+    step(removeText, { n: next(), ...removeStep });
+
+    /**
+     * The reload comes SECOND, right after the removal, because it is what makes the removal stick.
+     *
+     * Measured, not assumed: uninstalling the competitor ran its own uninstall hook, which restored
+     * Claude Code's original file and deleted its backup - and then the still-running instance put
+     * its change straight back within seconds, because VS Code keeps an uninstalled extension loaded
+     * until a reload. So the file is only clean once the window has restarted.
+     *
+     * And once it is clean this whole box disappears, which makes the steps below a FALLBACK for a
+     * tool that does not put the file back - not the normal path. They used to run unconditionally,
+     * telling everyone to reinstall Claude Code when most never need to.
+     */
+    // Ticks with the step above it, and that is sound rather than lazy: VS Code only sweeps a
+    // removed extension's folder at startup, so the folder being gone - which is what makes
+    // vendorState 'no' rather than 'disabled' - IS the evidence that a reload has happened.
+    step(vendorStopped
+      ? 'The window has been reloaded, so it is no longer running.'
+      : 'Reload the window. Until you do, a removed extension keeps running - and puts its change straight back.', {
+      n: next(), done: vendorStopped,
+      btn: 'Reload window', onClick: () => reloadHere(),
+    });
+
+    // Indented to the label column so the rail runs through it: this note sits between step two and
+    // step three, and at full width it cut the connector, leaving three steps below looking like a
+    // separate list. The after-done class colours that stretch of rail with the steps above it.
+    // Appended INTO the step column, not between two of them. Two sibling columns each started
+    // their own rail, so the connector died at step two and restarted at step three - the sequence
+    // read as two unrelated lists. One column, one rail, and the note is simply a row in it.
+    const onlyIfNeeded = el('div', 'step-note' + (gone ? ' after-done' : ''));
+    onlyIfNeeded.textContent = 'Most tools put Claude Code\u2019s file back when they are removed. If this box is gone after the reload, you are done - the steps below are only for a tool that did not.';
+    actions.append(onlyIfNeeded);
+
+    const restStep = (text, opts) => stepRow(actions, text, opts);
+
+    // Same rule as the lead: "removed" is a claim about something the developer just did here, so it
+    // is only said when a repair is genuinely under way. Otherwise the step describes the state.
+    // The old copy promised that removing Claude Code "takes the changed file off your machine". It
+    // does not: the folder survives until the app restarts, which is the whole reason these steps
+    // used to end in a file that had never changed.
+    restStep(reached(1)
+      ? (filesStale
+        ? 'Claude Code is removed, but its files are still on disk until ' + appLabel + ' restarts.'
+        : sv.repairing
+          ? 'Claude Code is removed, and the changed file went with it.'
+          : 'Claude Code is not installed, so there is nothing to remove.')
+      : 'Remove Claude Code. The changed file goes with it at the next restart.', {
+      n: next(), done: reached(1), btn: 'Remove Claude Code',
+      onClick: () => send('uninstall-extension', { id: CLAUDE_CODE_EXT_ID, from: id }),
+    });
+
+    // Quit, not reload, and the difference is the entire bug. A window reload restarts the extension
+    // host but deletes nothing; only starting the app again removes an uninstalled extension's
+    // folder. Reloading here left the patched bytes in place and the next step reinstalled on top of
+    // them, so the sequence completed with the file exactly as it started.
+    restStep(filesStale
+      ? 'Quit ' + appLabel + ' completely and open it again. This is when the changed file is deleted - a window reload leaves it on disk.'
+      : removalPending
+        ? 'Reload again. Until you do, the removed Claude Code is still loaded.'
+        : 'Reload so the removal takes effect.', filesStale
+      ? { n: next(), done: reached(2) }
+      : {
+        n: next(), done: reached(2),
+        btn: 'Reload window', onClick: () => reloadHere(),
+      });
+
+    // "on a clean file" used to end this sentence, and it could never be true where it was read:
+    // this box only renders while the file IS contested, so the last step congratulated the
+    // developer on a clean file directly above the warning that the file was not clean. A step may
+    // tick for the action it asked for - Claude Code is back - and must claim nothing about bytes it
+    // has not checked.
+    restStep(reached(3)
+      ? 'Claude Code is installed again.'
+      : filesStale
+        // Reinstalling on top of a folder that has not been deleted yet gets the old bytes back.
+        ? 'Install Claude Code again, after the restart above.'
+        : 'Install Claude Code again, then turn on ' + label + ' here.', {
+      n: next(), done: reached(3), btn: 'Install Claude Code',
+      onClick: () => send('install-extension', { id: CLAUDE_CODE_EXT_ID }),
+    });
+    box.append(actions);
+
+    /**
+     * Every step ticked and the file contested anyway: the checklist has FAILED, and until now it
+     * said so nowhere.
+     *
+     * The page read as finished - five ticks, no buttons left - while the box above it warned the
+     * format was blocked and the activate button was (correctly) withheld. So the software looked
+     * broken in the one state where it most needed to be believed. A finished list that has not
+     * fixed anything has to admit it and hand over the next real action.
+     */
+    // sv.conflict is load-bearing, not belt-and-braces: this box also renders on the latch alone,
+    // in the window between putting Claude Code back and the reload that finishes the job. The file
+    // is genuinely clean there, so "the change is back in the file" would be exactly wrong.
+    if (gone && reached(3) && sv.conflict) {
+      // Warn treatment, not a grey footnote. It is the one sentence in the box that contradicts the
+      // row of ticks above it, and it has to outrank them or the page still reads as finished.
+      const stalled = el('div', 'stalled');
+      stalled.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6 15 14H1L8 1.6z"/><path d="M8 6.4v3.1M8 11.6h.01"/></svg>';
+      const strong = el('b');
+      strong.textContent = 'These steps did not hold. ';
+      const rest2 = text('Every step is done and the file is still changed. Most often the old bytes '
+        + 'were never deleted: an editor only removes an uninstalled extension\u2019s folder when the whole '
+        + 'app restarts, so a window reload leaves the changed file exactly where it was. Quit '
+        + appLabel + ' completely, open it again, and any other editor you have running too.');
+      const body = el('span');
+      body.append(strong, rest2);
+      stalled.appendChild(body);
+      box.append(stalled);
+
+      // Plain buttons, not numbered steps. The numbered list is spent; presenting a sixth step
+      // would say the same sequence is still running when it has just been shown not to work.
+      const after = el('div', 'stalled-acts');
+      const act = (text, onClick) => {
+        const b = el('button', 'conflict-act');
+        b.textContent = text;
+        b.onclick = onClick;
+        after.append(b);
+      };
+      act('Reload window', () => reloadHere());
+      act('Show all extensions', () => send('open-extensions', { query: '@installed' }));
+      box.append(after);
+    }
+  }
+
+  const rows = [];
+  if (sv.conflictVendorId) {
+    rows.push(['Open ' + who, 'Uninstall ' + whoLow + ' from its own page.',
+      () => send('open-extension', { id: sv.conflictVendorId })]);
+  }
+  // Not offered when the other copy is in a different editor: reinstalling Claude Code there just
+  // hands it a fresh file to change, which is the loop this state exists to name.
+  if (vendorState !== 'elsewhere') {
+    rows.push(['Open Claude Code', 'Uninstall it, then install it again to get a clean file.',
+      () => send('open-extension', { id: CLAUDE_CODE_EXT_ID })]);
+  }
+  rows.push(['Show all extensions', 'Everything installed, in one list.',
+    () => send('open-extensions', { query: '@installed' })]);
+  // Kept even though the numbered flow may not end in one: doing it by hand means doing the
+  // uninstalls by hand, and THAT is what needs a reload.
+  rows.push(['Reload window', 'Needed after removing an extension, not after installing one.',
+    () => reloadHere()]);
+  box.append(manualSection(rows));
+  return box;
+}
+
+/**
+ * A blocked format that has a way out, on its own page.
+ *
+ * ── The gap this closes ──────────────────────────────────────────────────────────
+ *
+ * Removing Claude Code is step two of the conflict fix - and the moment it lands, the file is gone,
+ * so the state stops being "contested" and becomes "the editor extension is not installed". The
+ * conflict box was correct to disappear, but it took the remaining steps with it: the developer was
+ * left mid-sequence on a page that had stopped explaining anything, having done exactly what they
+ * were told.
+ *
+ * So the remaining steps live HERE, keyed on the state that is actually true. No latch, nothing
+ * remembered: "Claude Code is not installed, here is how to install it and reload" is the right
+ * guidance for someone half way through the fix AND for someone who simply never had it. The
+ * sequence continues because both boxes describe the same world, not because either is tracking the
+ * other.
+ */
+function buildBlockedBox(id, sv, m) {
+  const reason = sv.blockedReason;
+  if (reason !== 'no-agent-editor' && reason !== 'no-agent-cli') return null;
+  // Mid-repair machines keep the repair checklist instead; this is the never-had-it case, where a
+  // list that opened with two ticked steps would describe something the developer never did.
+  if (sv.repairing) return null;
+  const label = m.label || id;
+
+  const box = el('div', 'info-box conflict');
+  const lbl = el('div', 'info-label');
+  const lead = el('div', 'conflict-text');
+
+  if (reason === 'no-agent-cli') {
+    lbl.textContent = 'Claude Code is not on this machine';
+    lead.textContent = 'Awaitful earns while Claude Code thinks, so nothing can run here until it is installed. Install it and run it once, then come back to this page.';
+    box.append(lbl, lead);
+    const actions = el('div', 'conflict-actions');
+    stepRow(actions, 'Install Claude Code and run it once.', {
+      n: 1, btn: 'Set up Claude Code', onClick: () => send('open-setup-docs'),
+    });
+    stepRow(actions, 'Reload this window, then turn on ' + label + ' here.', {
+      n: 2, btn: 'Reload window', onClick: () => reloadHere(),
+    });
+    box.append(actions);
+    return box;
+  }
+
+  lbl.textContent = 'Claude Code is not installed in this window';
+  lead.textContent = label + ' lives inside the Claude Code extension, so it has nothing to attach to until that is back. Your status bar and terminal keep earning meanwhile. If you just removed it to clear another tool\u2019s change, this is the rest of that fix.';
+  box.append(lbl, lead);
+
+  // One step. Installing an extension needs no reload - VS Code registers it immediately and this
+  // box clears itself. A reload is only needed to unload something that was REMOVED.
+  const actions = el('div', 'conflict-actions');
+  stepRow(actions, 'Install Claude Code. A fresh install is a clean file, with no other tool\u2019s change in it. Then turn on ' + label + ' here.', {
+    n: 1, btn: 'Install Claude Code', onClick: () => send('install-extension', { id: CLAUDE_CODE_EXT_ID }),
+  });
+  box.append(actions);
+
+  box.append(manualSection([
+    ['Open Claude Code', 'Install it from its own page.', () => send('open-extension', { id: CLAUDE_CODE_EXT_ID })],
+    ['Reload window', 'Needed after removing an extension, not after installing one.', () => reloadHere()],
+  ]));
+  return box;
 }
 
 function buildDetailView(id) {
   if (id === 'status-bar') return buildStatusBarDetail();
   const isVS = META[id];
-  const termMeta = { label: 'Terminal status line', desc: 'Adds a status line to Claude Code (~/.claude/settings.json) that shows a single sponsored line while the agent is thinking, then hands back to your own status line the instant it finishes. Your existing status line is preserved and restored. Works in any terminal - VS Code’s or external - and earns alongside your VS Code surface.', files: [{ path: '~/.claude/settings.json', why: 'Adds a statusLine entry pointing at Awaitful’s script. Your existing status line is backed up and restored when you turn this off.' }], ghPath: 'src/hooks/statusLineScript.ts' };
+  const termMeta = { label: 'Terminal status line', desc: 'Adds a status line to Claude Code (~/.claude/settings.json) that shows a single sponsored line while the agent is thinking, then hands back to your own status line the instant it finishes. Your existing status line is preserved and restored. Works in any terminal - your editor’s or external - and earns alongside whichever format you picked there.', files: [{ path: '~/.claude/settings.json', why: 'Adds a statusLine entry pointing at Awaitful’s script. Your existing status line is backed up and restored when you turn this off.' }], ghPath: 'src/hooks/statusLineScript.ts' };
   const m = isVS ? META[id] : (id === 'terminal' ? termMeta : {});
 
   const panel = el('div', 'panel');
@@ -1173,80 +2249,40 @@ function buildDetailView(id) {
   const detailChip = rateChip(detailRate, id === 'terminal');
   if (detailChip) titleRow.append(detailChip);
   const desc = el('div', 'detail-desc'); desc.textContent = m.desc || '';
-  panel.append(titleRow, desc);
 
-  // Chat-banner: the banner-style gallery stays up top (the main thing you tune here).
-  if (id === 'chat-banner' && (state.chatBannerThemes || []).length) {
-    const themes = state.chatBannerThemes;
-    ensureThemeKeyframes(state.chatBannerKeyframes); // register @property/@keyframes so the preview animates
+  // Terminal isn't a VS Code format (not in vsSurfaces) - synthesize its state so the footer's
+  // Enable/Restore logic works. It has no competitor-conflict concept (settings.json
+  // preserve/restore handles coexistence). Resolved before the heading, because the heading now
+  // carries the page's primary action and needs to know whether there is one.
+  const svDetail = id === 'terminal'
+    ? { active: !!state.terminalEnabled, blockedReason: state.terminalBlockedReason, conflict: false }
+    : ((state.vsSurfaces || []).find(s => s.id === id) || {});
+  const modFiles = m.files || (m.file ? [{ path: m.file, why: '' }] : null);
 
-    const styleBox = el('div', 'info-box');
-    const sLbl = el('div', 'info-label'); sLbl.textContent = 'Banner style';
-    styleBox.append(sLbl);
+  panel.append(detailHead(titleRow, detailPrimary(id, svDetail, m)), desc);
 
-    // Mock ad banner + mock chat box — the glow's colour AND frame reflect the selection, animated.
-    const preview = el('div', 'bp-preview');
-    const glow = el('div', 'bp-glow');
-    const face = el('div', 'bp-face');
-    const txt = el('span', 'bp-text'); txt.textContent = state.activeAdLine || 'Your sponsored line shows here';
-    const tmr = el('span', 'bp-timer'); tmr.textContent = '1.2s';
-    face.append(txt, tmr);
-    const box = el('div', 'bp-box'); const ph = el('span'); ph.textContent = 'Message Claude…'; box.append(ph);
-    preview.append(glow, face, box);
-    styleBox.append(preview);
-
-    const applyColor = (t) => { glow.style.background = t.background; glow.style.animation = t.animation; };
-    const applyFrame = (fid) => {
-      glow.classList.remove('f-banner', 'f-full');
-      glow.classList.add(fid === 'full' ? 'f-full' : 'f-banner');
-      preview.classList.toggle('is-full', fid === 'full');
-    };
-    const selColor = () => themes.find(t => t.id === state.chatBannerStyle) || themes[0];
-    applyColor(selColor());
-    applyFrame(state.chatBannerFrame);
-
-    // Frame toggle (Banner vs Full box) — orthogonal to the colour theme.
-    const frames = state.chatBannerFrames || [];
-    if (frames.length > 1) {
-      const frameRow = el('div', 'bp-frame-row');
-      for (const f of frames) {
-        const b = el('button', 'bp-frame');
-        if (state.chatBannerFrame === f.id) b.classList.add('on');
-        b.textContent = f.label;
-        b.onclick = () => {
-          send('set-banner-frame', { frame: f.id });
-          state.chatBannerFrame = f.id;
-          for (const c of frameRow.children) c.classList.remove('on');
-          b.classList.add('on');
-          applyFrame(f.id);
-        };
-        frameRow.append(b);
-      }
-      styleBox.append(frameRow);
-    }
-
-    // Colour gallery
-    const row = el('div', 'theme-row');
-    for (const t of themes) {
-      const chip = el('button', 'theme-chip');
-      if (state.chatBannerStyle === t.id) chip.classList.add('on');
-      const sw = el('span', 'theme-swatch'); if (t.swatch) sw.style.background = t.swatch;
-      const lbl = el('span'); lbl.textContent = t.label;
-      chip.append(sw, lbl);
-      chip.onmouseenter = () => applyColor(t);           // hover to preview…
-      chip.onmouseleave = () => applyColor(selColor());
-      chip.onclick = () => {                                 // …click to keep it
-        send('set-banner-style', { style: t.id });
-        state.chatBannerStyle = t.id;
-        for (const c of row.children) c.classList.remove('on');
-        chip.classList.add('on');
-        applyColor(t);
-      };
-      row.append(chip);
-    }
-    styleBox.append(row);
-    panel.append(styleBox);
+  // FIRST, above everything else on the page. This is the reason the format is not working, and it
+  // used to sit below the styling controls - so the page opened on "pick a spinner" while the thing
+  // that actually needed doing was off screen.
+  if (modFiles && repairBoxNeeded(svDetail)) {
+    // Same box, same steps, right through the middle of the repair - including the moment removing
+    // Claude Code stops the file being contested at all.
+    panel.append(buildConflictBox(id, svDetail, m));
+  } else if (modFiles && svDetail.repairing) {
+    // The repair worked and one reload is left. It used to keep the whole conflict box for this,
+    // which then drew steps for a conflict that no longer existed - "remove the other extension"
+    // with nothing left to remove, and an offer to restore a file already clean.
+    panel.append(buildRepairDoneBox(m));
+  } else {
+    // Not contested, but still unable to run - and until now this page said nothing at all about
+    // why. That silence is what swallowed the back half of the conflict fix.
+    const blocked = buildBlockedBox(id, svDetail, m);
+    if (blocked) panel.append(blocked);
   }
+
+  // How this format looks: the thing you came here to change once the format is on.
+  const cz = buildCustomize(id);
+  if (cz) panel.append(cz);
 
   // Chat-banner: a precise note on what this mode is.
   if (id === 'chat-banner') {
@@ -1258,52 +2294,7 @@ function buildDetailView(id) {
     panel.append(whyBox);
   }
 
-  // Terminal isn't a VS Code surface (not in vsSurfaces) — synthesize its state so the footer's
-  // Enable/Restore logic works. It has no competitor-conflict concept (settings.json preserve/restore
-  // handles coexistence).
-  const svDetail = id === 'terminal'
-    ? { active: !!state.terminalEnabled, comingSoon: false, conflict: false }
-    : ((state.vsSurfaces || []).find(s => s.id === id) || {});
-  const modFiles = m.files || (m.file ? [{ path: m.file, why: '' }] : null);
-
   if (modFiles) {
-    // Conflict banner — Claude Code has been modified by another extension.
-    if (svDetail.conflict) {
-      const who = svDetail.conflictVendor ? svDetail.conflictVendor : 'Another extension';
-      const box = el('div', 'info-box conflict');
-      const clbl = el('div', 'info-label'); clbl.textContent = 'Claude Code is already modified';
-      box.append(clbl);
-      if (svDetail.canTakeOver) {
-        const cp = el('div', 'conflict-text');
-        cp.textContent = who + ' has modified Claude Code. Awaitful can restore the genuine original file, verified byte-for-byte against the known-good version, then apply its own. Click below to do that.' + (svDetail.conflictVendor ? ' Afterwards, disable ' + svDetail.conflictVendor + ' so the two do not change the same file.' : '');
-        box.append(cp);
-      } else {
-        const whoLow = svDetail.conflictVendor ? svDetail.conflictVendor : 'the other extension';
-        const lead = el('div', 'conflict-text');
-        lead.textContent = who + ' changed Claude Code’s files, and Awaitful has no verified-clean copy to restore. Disabling ' + whoLow + ' stops new changes but will not undo what is already on disk, so the clean fix is to reinstall Claude Code, then turn on ' + (m.label || id) + ' here.';
-        box.append(lead);
-        // Actionable steps: each opens the exact VS Code view instead of describing where to click.
-        const actions = el('div', 'conflict-actions');
-        const step = (n, label, btnText, onClick) => {
-          const row = el('div', 'conflict-step');
-          const num = el('span', 'num'); num.textContent = n;
-          const lbl = el('span', 'lbl'); lbl.textContent = label;
-          row.append(num, lbl);
-          if (btnText) { const b = el('button', 'conflict-act'); b.textContent = btnText; b.onclick = onClick; row.append(b); }
-          actions.append(row);
-        };
-        step('1', 'Turn off ' + whoLow + ' so it stops changing the files.',
-          svDetail.conflictVendor ? 'Manage ' + who + ' →' : 'Open extensions →',
-          () => send('open-extensions', { query: svDetail.conflictVendor || '@installed' }));
-        step('2', 'Reinstall Claude Code to restore its original files.',
-          'Open Claude Code →', () => send('open-extensions', { query: 'Claude Code' }));
-        step('3', 'Reload this window, then turn on ' + (m.label || id) + ' here.',
-          'Reload window', () => send('reload-window'));
-        box.append(actions);
-      }
-      panel.append(box);
-    }
-
     // What changes — one row per file, each with why it changes.
     const box1 = el('div', 'info-box');
     const lbl1 = el('div', 'info-label'); lbl1.textContent = modFiles.length > 1 ? 'What changes (' + modFiles.length + ' files)' : 'What changes';
@@ -1321,7 +2312,7 @@ function buildDetailView(id) {
     const ul = el('ul', 'restore-list');
     const restoreItems = id === 'terminal'
       ? ['Your existing status line is saved before any change', 'The status-line script talks only to 127.0.0.1 and sends no content', 'Restored exactly when you turn this off or restore files']
-      : ['A byte-exact copy is saved before any change', 'Restored when you switch surface, sign out, or uninstall', 'Restore any time with the button below'];
+      : ['A byte-exact copy is saved before any change', 'Restored when you switch format, sign out, or uninstall', 'Restore any time with the button below'];
     restoreItems.forEach(t => {
       const li = el('li'); li.textContent = t; ul.append(li);
     });
@@ -1360,54 +2351,20 @@ function buildDetailView(id) {
   // restoring only takes full effect after the Claude Code webview reloads.
   const reloadBtn = el('button', 'btn-ghost');
   reloadBtn.textContent = 'Reload window';
-  reloadBtn.onclick = () => send('reload-window');
+  reloadBtn.onclick = () => reloadHere();
   if (!modFiles) reloadBtn.style.display = 'none';
 
   const right = el('div', 'detail-footer-r');
-  const cancel = el('button', 'btn-ghost'); cancel.textContent = 'Cancel'; cancel.onclick = () => { state._view = 'surfaces'; render(); };
-
-  right.append(cancel);
-  if (id === 'terminal' && !svDetail.active) {
-    // Terminal enables via its own toggle path (settings.json statusLine), not the webview patch.
-    const enableBtn = el('button', 'btn-primary');
-    enableBtn.textContent = 'Enable ' + (m.label || id);
-    enableBtn.onclick = () => { send('toggle-terminal'); state._view = 'surfaces'; render(); };
-    right.append(enableBtn);
-  } else if (modFiles && !svDetail.comingSoon && !svDetail.active) {
-    // A conflict only offers a take-over when pristine is recoverable from a
-    // Awaitful-controlled source; otherwise the guidance above is the path.
-    if (svDetail.conflict && !svDetail.canTakeOver) {
-      // no primary button — the conflict box tells the user what to do
-    } else if (svDetail.conflict) {
-      const enableBtn = el('button', 'btn-primary');
-      enableBtn.textContent = 'Restore original & enable';
-      enableBtn.onclick = () => { send('consent-grant', { id, takeover: true }); state._view = 'surfaces'; render(); };
-      right.append(enableBtn);
-    } else {
-      const enableBtn = el('button', 'btn-primary');
-      enableBtn.textContent = 'Enable ' + (m.label || id);
-      enableBtn.onclick = () => { send('consent-grant', { id }); state._view = 'surfaces'; render(); };
-      right.append(enableBtn);
-    }
-  }
+  // A blocked surface never offers Enable. The state can change while a detail page is open (the
+  // user uninstalls Claude Code in another window), so this is guarded here too, not only upstream.
+  // No enable button down here: the page's primary action lives at the top, beside the heading. Two
+  // copies of one action is what let the take-over's button and its explanation drift apart.
   const left = el('div', 'detail-footer-l');
   left.append(restoreBtn, reloadBtn);
   footer.append(left, right);
   panel.append(footer);
 
   return panel;
-}
-
-function handleEnable(sv) {
-  // File-modifying surfaces always open their detail page — that's where the
-  // user reviews exactly what changes and triggers the patch. (Consent may
-  // already be granted from a previous session, but the surface still has to be
-  // re-applied here, so we must not skip the detail page.)
-  if (sv.modifiesFiles) {
-    openDetail(sv.id);
-  } else {
-    send('set-surface', { id: sv.id });
-  }
 }
 
 function openDetail(id) {
@@ -1450,11 +2407,15 @@ function fmtUsd(s) {
   return '$' + (v < 0.01 ? v.toFixed(4) : v.toFixed(2));
 }
 
-// ── Customize ad page ───────────────────────────────────────────────
-// Same skeleton as a surface detail page: back button, title, description, info-boxes.
-// This page is the developer's control over the FRAME an ad is drawn in - the spinner, the logo.
-// It deliberately offers nothing that touches the MESSAGE (the sponsored line and its link): that
-// is what the advertiser actually bought, and hiding it while still being paid would be a lie.
+// ── Customize, on each format's own page ─────────────────────────────────────
+// These controls are the developer's say over the FRAME an ad is drawn in - the spinner, the logo,
+// the glow. They deliberately offer nothing that touches the MESSAGE (the sponsored line and its
+// link): that is what the advertiser actually bought, and hiding it while still being paid would
+// be a lie.
+//
+// Nothing below knows what a "spinner" or a "glow" is. state.customize[format] carries each element
+// with its control kind, its options and the value in force, straight from the shared catalogue, so
+// adding an element there gives every format that declares it a working control with no code here.
 
 /**
  * The stand-in logo. Awaitful advertises on its own network (the house ad), so this is a real ad
@@ -1464,98 +2425,208 @@ function fmtUsd(s) {
 const SAMPLE_LOGO = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCc+PHJlY3Qgd2lkdGg9JzI0JyBoZWlnaHQ9JzI0JyByeD0nNicgZmlsbD0nIzE3MzQwMCcvPjxwYXRoIGQ9J00xMiA1LjVhNi41IDYuNSAwIDEgMS02LjUgNi41JyBmaWxsPSdub25lJyBzdHJva2U9JyNBMUU5NkYnIHN0cm9rZS13aWR0aD0nMi42JyBzdHJva2UtbGluZWNhcD0ncm91bmQnLz48L3N2Zz4=';
 const SAMPLE_LINE = 'Awaitful: Get paid awaiting your AI thinking!';
 
-function buildAdView() {
-  const panel = el('div', 'panel');
-  const back = backButton();
-  panel.append(back);
-
-  const title = el('div', 'detail-title'); title.textContent = 'Customize ad';
-  const desc = el('div', 'detail-desc');
-  desc.textContent = 'How an ad looks to you, on every surface, only while the agent is thinking. The sponsored line always shows; everything around it is yours.';
-  panel.append(title, desc);
-
-  /* ── Spinner ── */
-  const box = el('div', 'info-box');
-  const lbl = el('div', 'info-label'); lbl.textContent = 'Ad spinner';
-  const grid = el('div', 'spin-grid');
-  for (const sp of (state.adSpinners || [])) {
-    const tile = el('button', 'spin-tile');
-    if (!sp.frames.length) tile.classList.add('none');
-    if (state.adSpinner === sp.id) tile.classList.add('on');
-    tile.title = sp.label;
-    tile.setAttribute('aria-label', sp.label);
-    const glyph = el('span', 'spin-glyph');
-    glyph.textContent = sp.frames[0] || 'off';
-    tile.append(glyph);
-    tile.onclick = () => {
-      send('set-ad-spinner', { id: sp.id });
-      state.adSpinner = sp.id;
-      for (const c of grid.children) c.classList.remove('on');
-      tile.classList.add('on');
-    };
-    grid.append(tile);
-    if (sp.frames.length) spinCells.push({ frames: sp.frames, intervalMs: sp.intervalMs, glyph, txt: glyph.textContent });
-  }
-  box.append(lbl, grid);
-
-  /* ── Brand logo ── */
-  const logoBox = el('div', 'info-box');
-  const logoLbl = el('div', 'info-label'); logoLbl.textContent = 'Brand logo';
-
-  const row = el('div', 'opt-row');
-  const text = el('div', 'opt-text');
-  const t = el('div', 'opt-title'); t.textContent = "Show the advertiser's logo";
-  // Say the honest thing: the switch does not summon a logo. Most ads have none, and two of the
-  // three surfaces draw text only, so "on" means "show it when there is one to show".
-  const sub = el('div', 'opt-sub');
-  sub.textContent = 'When the ad has one. Most do not, and the status bar and terminal show text only.';
-  text.append(t, sub);
-
-  const on = state.adBrandLogo !== false;
-  const toggle = el('button', 'toggle');
-  if (on) toggle.classList.add('on');
-  toggle.setAttribute('role', 'switch');
-  toggle.setAttribute('aria-checked', on ? 'true' : 'false');
-  toggle.setAttribute('aria-label', "Show the advertiser's logo");
-  row.append(text, toggle);
-
-  // The example is the ad line itself, in the shim's own order: spinner, logo, text. Toggling
-  // collapses the logo slot and the text closes the gap, exactly as it will in the editor.
-  const eg = el('div', 'ad-eg');
-  if (!on) eg.classList.add('off');
-  const egSpin = el('span', 'ad-eg-spin');
-  const egLogo = el('img', 'ad-eg-logo');
-  egLogo.src = SAMPLE_LOGO;
-  egLogo.setAttribute('alt', '');
-  const egText = el('span', 'ad-eg-text'); egText.textContent = SAMPLE_LINE;
-  eg.append(egSpin, egLogo, egText);
-
-  // Animate the example with the spinner the developer actually chose, off the same wall clock as
-  // every real surface - so the preview cannot drift from the thing it is previewing.
-  const chosen = (state.adSpinners || []).find(sp => sp.id === state.adSpinner);
-  if (chosen && chosen.frames.length) {
-    egSpin.textContent = chosen.frames[0];
-    spinCells.push({ frames: chosen.frames, intervalMs: chosen.intervalMs, glyph: egSpin, txt: chosen.frames[0] });
-  }
-
-  toggle.onclick = () => {
-    const next = !toggle.classList.contains('on');
-    toggle.classList.toggle('on', next);
-    toggle.setAttribute('aria-checked', next ? 'true' : 'false');
-    eg.classList.toggle('off', !next);
-    state.adBrandLogo = next;
-    send('toggle-ad-logo');
-  };
-
-  logoBox.append(logoLbl, row, eg);
-  panel.append(box, logoBox);
-  return panel;
+/** One format's elements, or [] for a format that draws none. */
+function elementsOf(fmtId) {
+  return (state.customize || {})[fmtId] || [];
+}
+function elementOf(fmtId, elementId) {
+  return elementsOf(fmtId).find(e => e.id === elementId);
+}
+function optionOf(fmtId, elementId, optId) {
+  const e = elementOf(fmtId, elementId);
+  return e ? (e.options || []).find(o => o.id === optId) : undefined;
 }
 
-// Wall-clock frames, the same math every real surface uses, so the preview never lies. The loop
-// is idle-cheap: spinCells is empty on every page but Customize ad.
+/**
+ * The sponsored line as the shim paints it: spinner, logo, text - in that order, from this format's
+ * own values. Every format's page previews with this same function, so a preview cannot drift from
+ * the thing it previews, and a format that draws no logo simply has no logo slot.
+ */
+function linePreview(fmtId) {
+  const eg = el('div', 'ad-eg');
+  const spin = el('span', 'ad-eg-spin');
+  eg.append(spin);
+
+  let img = null;
+  if (elementOf(fmtId, 'logo')) {
+    img = el('img', 'ad-eg-logo');
+    img.src = SAMPLE_LOGO;
+    img.setAttribute('alt', '');
+    eg.append(img);
+  }
+  const txt = el('span', 'ad-eg-text');
+  txt.textContent = state.activeAdLine || SAMPLE_LINE;
+  eg.append(txt);
+
+  // One mutable cell in the shared wall-clock loop, re-pointed as the choice changes - so picking a
+  // spinner animates the example immediately without a timer of its own.
+  const cell = { frames: [], intervalMs: 0, glyph: spin, txt: '' };
+  spinCells.push(cell);
+
+  return {
+    node: eg,
+    setSpinner: (id) => {
+      const o = optionOf(fmtId, 'spinner', id) || {};
+      cell.frames = o.frames || [];
+      cell.intervalMs = o.intervalMs || 0;
+      // "None" is a real choice: clear the glyph rather than leave the last frame frozen there.
+      if (!cell.frames.length) { cell.txt = ''; spin.textContent = ''; }
+    },
+    setLogo: (on) => { eg.classList.toggle('off', on !== true); },
+  };
+}
+
+/** The chat banner's chrome around that same line: the glow ring and the chat box it outlines. */
+function bannerChrome(lineNode) {
+  const preview = el('div', 'bp-preview');
+  const glow = el('div', 'bp-glow');
+  const face = el('div', 'bp-face');
+  const tmr = el('span', 'bp-timer'); tmr.textContent = '1.2s';
+  face.append(lineNode, tmr);
+  const box = el('div', 'bp-box');
+  const ph = el('span'); ph.textContent = 'Message Claude…';
+  box.append(ph);
+  preview.append(glow, face, box);
+  return {
+    node: preview,
+    setGlow: (o) => { if (o) { glow.style.background = o.background; glow.style.animation = o.animation; } },
+    setFrame: (id) => {
+      glow.classList.remove('f-banner', 'f-full');
+      glow.classList.add(id === 'full' ? 'f-full' : 'f-banner');
+      preview.classList.toggle('is-full', id === 'full');
+    },
+  };
+}
+
+/**
+ * The customization block for one format: a live preview of that format's ad, then a control for
+ * each element it declares. Returns null for a format that declares none, so a page never renders
+ * an empty box.
+ */
+function buildCustomize(fmtId) {
+  const elements = elementsOf(fmtId);
+  if (!elements.length) return null;
+
+  const box = el('div', 'info-box');
+  const lbl = el('div', 'info-label'); lbl.textContent = 'Customize';
+  box.append(lbl);
+
+  const line = linePreview(fmtId);
+  let chrome = null;
+  if (elementOf(fmtId, 'glow')) {
+    // Register the glow @keyframes/@property once, or the ring renders as a still gradient.
+    ensureThemeKeyframes(state.glowKeyframes);
+    chrome = bannerChrome(line.node);
+    box.append(chrome.node);
+  } else {
+    box.append(line.node);
+  }
+
+  // Every element's live effect on the preview, in one place. An element with nothing to preview
+  // (there is none today) simply falls through, so this can never throw on a newer catalogue.
+  const preview = (elementId, value) => {
+    if (elementId === 'spinner') line.setSpinner(value);
+    else if (elementId === 'logo') line.setLogo(value);
+    else if (elementId === 'glow' && chrome) chrome.setGlow(optionOf(fmtId, 'glow', value));
+    else if (elementId === 'frame' && chrome) chrome.setFrame(value);
+  };
+
+  for (const e of elements) {
+    box.append(buildElement(fmtId, e, preview));
+    preview(e.id, e.value);   // seed the preview from what is in force right now
+  }
+  return box;
+}
+
+/** One element's control. Its control kind decides the shape; nothing here is element-specific. */
+function buildElement(fmtId, e, preview) {
+  const wrap = el('div', 'elem');
+  const commit = (value) => {
+    e.value = value;                 // local echo, so the control and preview react before the round trip
+    send('set-element', { format: fmtId, element: e.id, value });
+    preview(e.id, value);
+  };
+
+  if (e.control === 'switch') {
+    const row = el('div', 'opt-row');
+    const txt = el('div', 'opt-text');
+    const t = el('div', 'opt-title'); t.textContent = e.label;
+    const sub = el('div', 'opt-sub'); sub.textContent = e.hint;
+    txt.append(t, sub);
+    const tg = el('button', 'toggle');
+    if (e.value === true) tg.classList.add('on');
+    tg.setAttribute('role', 'switch');
+    tg.setAttribute('aria-checked', e.value === true ? 'true' : 'false');
+    tg.setAttribute('aria-label', e.label);
+    tg.onclick = () => {
+      const next = !tg.classList.contains('on');
+      tg.classList.toggle('on', next);
+      tg.setAttribute('aria-checked', next ? 'true' : 'false');
+      commit(next);
+    };
+    row.append(txt, tg);
+    wrap.append(row);
+    return wrap;
+  }
+
+  const head = el('div', 'elem-head');
+  const t = el('div', 'opt-title'); t.textContent = e.label;
+  const sub = el('div', 'opt-sub'); sub.textContent = e.hint;
+  head.append(t, sub);
+  wrap.append(head);
+
+  const options = e.options || [];
+  const select = (row, node, value) => {
+    for (const c of row.children) c.classList.remove('on');
+    node.classList.add('on');
+    commit(value);
+  };
+
+  if (e.control === 'gallery') {
+    const grid = el('div', 'spin-grid');
+    for (const o of options) {
+      const frames = o.frames || [];
+      const tile = el('button', 'spin-tile');
+      if (!frames.length) tile.classList.add('none');
+      if (e.value === o.id) tile.classList.add('on');
+      tile.title = o.label;
+      tile.setAttribute('aria-label', o.label);
+      const glyph = el('span', 'spin-glyph');
+      glyph.textContent = frames[0] || 'off';
+      tile.append(glyph);
+      tile.onclick = () => select(grid, tile, o.id);
+      grid.append(tile);
+      if (frames.length) spinCells.push({ frames, intervalMs: o.intervalMs, glyph, txt: glyph.textContent });
+    }
+    wrap.append(grid);
+    return wrap;
+  }
+
+  // 'swatch' and 'chip' are the same row: a swatch option just carries a colour to show alongside
+  // its label. An option that can be previewed live is previewed on hover and put back on leave.
+  const row = el('div', 'theme-row');
+  for (const o of options) {
+    const chip = el('button', 'theme-chip');
+    if (e.value === o.id) chip.classList.add('on');
+    if (o.swatch) { const sw = el('span', 'theme-swatch'); sw.style.background = o.swatch; chip.append(sw); }
+    const lb = el('span'); lb.textContent = o.label; chip.append(lb);
+    if (o.background) {
+      chip.onmouseenter = () => preview(e.id, o.id);
+      chip.onmouseleave = () => preview(e.id, e.value);
+    }
+    chip.onclick = () => select(row, chip, o.id);
+    row.append(chip);
+  }
+  wrap.append(row);
+  return wrap;
+}
+
+// Wall-clock frames, the same math every real surface uses, so the preview never lies. The loop is
+// idle-cheap: spinCells is empty on every page without a customize block. A cell with no frames is
+// the "none" spinner, which has nothing to tick and would divide by a zero interval.
 (function spinTick() {
   for (const c of spinCells) {
+    if (!c.frames.length || !c.intervalMs) continue;
     const f = c.frames[Math.floor(Date.now() / c.intervalMs) % c.frames.length];
     if (f !== c.txt) { c.txt = f; c.glyph.textContent = f; }
   }
@@ -1566,6 +2637,7 @@ function buildAdView() {
 window.addEventListener('message', e => {
   if (e.data.type === 'navigate') {
     state._view = e.data.view;
+    if (e.data.detailId !== undefined) state._detailId = e.data.detailId;
     render();
     return;
   }

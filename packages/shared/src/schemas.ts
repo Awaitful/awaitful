@@ -2,6 +2,52 @@ import { z } from 'zod';
 
 export const PlacementIdSchema = z.enum(['status-bar', 'thinking-line', 'terminal', 'browser', 'chat-banner']);
 
+/** The subset of PlacementId a developer may set as their account-wide remote surface preference. */
+export const RemoteSurfaceIdSchema = z.enum(['status-bar', 'thinking-line', 'chat-banner']);
+
+export const RemoteSurfacePreferenceRequestSchema = z.object({
+  surface: RemoteSurfaceIdSchema.nullable(),
+});
+
+/** A device reporting the surface it just confirmed applying - never null, since "applying nothing"
+ *  is not an action a device takes. */
+export const SurfaceAppliedRequestSchema = z.object({
+  surface: RemoteSurfaceIdSchema,
+});
+
+/** The terminal is additive, so it is its own on/off request rather than a fourth surface id.
+ *  `null` releases it back to each device deciding locally. */
+export const RemoteTerminalPreferenceRequestSchema = z.object({
+  enabled: z.boolean().nullable(),
+});
+
+/** A device reporting what its terminal status line actually ended up as. Never null: a device only
+ *  reports an outcome it reached, and "did nothing" is not one. */
+export const TerminalAppliedRequestSchema = z.object({
+  enabled: z.boolean(),
+});
+
+/**
+ * A patch to the account's ad-rendering preferences. Every field validates against the live
+ * registry in adCustomization.ts rather than a hardcoded zod enum, so adding a spinner, glow theme,
+ * or banner frame there is the only change needed - this schema picks it up with no edit of its own.
+ */
+/**
+ * A patch of per-format customization, keyed `${format}.${element}` (see syncedSettings).
+ *
+ * Deliberately a loose record rather than an enumerated object: the valid pairs are declared once
+ * in AD_FORMATS, and restating them here would be a second list to keep in step - the exact
+ * duplication the per-format model exists to avoid. `sanitizePatch` is the authority and drops
+ * anything unknown or unrenderable, so this only has to keep out values of an impossible TYPE.
+ *
+ * The four legacy account-wide keys are still accepted so an older web build can keep writing;
+ * they are read as a seed and never written back.
+ */
+export const AdPreferencesRequestSchema = z.record(
+  z.string(),
+  z.union([z.string(), z.boolean()]),
+);
+
 export const AdEventTypeSchema = z.enum([
   'impression_rendered',
   'impression_viewable',
@@ -31,6 +77,9 @@ export const AdSlateResponseSchema = z.object({
   etag: z.string().min(1),
   killswitch: z.boolean(),
   placementWeights: z.record(z.string(), z.number()).optional(),
+  // Must be declared here or zod strips it: plain z.object() drops unknown keys, so an undeclared
+  // field silently never reaches the client and the settings fast-path would quietly do nothing.
+  prefsVersion: z.number().int().nonnegative().optional(),
 });
 
 export const AdEventSchema = z.object({
@@ -193,3 +242,13 @@ export const DocFeedbackRequestSchema = z.object({
 
 export type DocFeedbackKindInput = z.input<typeof DocFeedbackKindSchema>;
 export type DocFeedbackRequestInput = z.input<typeof DocFeedbackRequestSchema>;
+
+/**
+ * The device-link handshake (VS Code extension <-> server). The extension registers a random
+ * `state` nonce, opens the web SPA's /link page, and polls until the browser approves. BOTH the
+ * start body and the poll query carry ONLY that nonce - never a name, an email, or any content.
+ * Shared so the client, the server, and the egress whitelist test all pin one shape: the same
+ * discipline the ad/event/patch payloads follow, extended to the sign-in flow.
+ */
+export const DeviceLinkStartRequestSchema = z.object({ state: z.string().uuid() });
+export const DeviceLinkPollQuerySchema = z.object({ state: z.string().uuid() });

@@ -122,3 +122,137 @@ describe('RecipeClient self-recipe (trust-on-first-use)', () => {
     expect(c.lookup(BUILD)).toBeUndefined();
   });
 });
+
+/**
+ * Coexistence with a competitor that patches the SAME Claude Code files. Every case here was
+ * reachable in the field; the first one actually happened and stranded a user on "Coming soon"
+ * with a competitor's ad rendering in the surface we were supposed to own.
+ */
+describe('RecipeClient coexistence with a competitor patch tool', () => {
+  /** Our real patch shape, so tests apply/strip exactly the bytes the engine would. */
+  function ourTargets() {
+    const r = assembleRecipe({
+      agent: 'claude-code', buildId: BUILD, version: '9.9.9', confidence: 1, status: 'verified',
+      targets: [
+        { file: 'webview/index.js', strategy: 'append-shim', pristineSha256: 'a'.repeat(64) },
+        { file: 'extension.js', strategy: 'csp-insert', pristineSha256: 'b'.repeat(64) },
+      ],
+    })!;
+    return {
+      webT: r.targets.find((t) => t.strategy === 'append-shim')!,
+      extT: r.targets.find((t) => t.strategy === 'csp-insert')!,
+    };
+  }
+  const VIBE = '/* VIBE-ADS-START */;(function(){})();/* VIBE-ADS-END */\n';
+
+  it('recovers pristine through OUR OWN block in a competitor backup (it backed up a file we had already patched)', () => {
+    // The field incident, exactly: we patched first, the competitor installed second and saved ITS
+    // "original" from our patched file, then wrote its own shim over genuine pristine.
+    const { webT } = ourTargets();
+    fs.writeFileSync(`${webFile}.kickbacks-backup`, applyToContent(WEB, webT));
+    fs.writeFileSync(webFile, WEB + VIBE);
+
+    const r = client().lookup(BUILD);
+    expect(r, 'a competitor backup carrying our block must still yield pristine').toBeDefined();
+    expect(r!.targets[0]!.pristineSha256).toBe(sha256(WEB)); // stripped back to genuine, not their file
+    expect(r!.targets[1]!.pristineSha256).toBe(sha256(EXT));
+  });
+
+  it('applying then stripping our patch is byte-exact, so a derived pristine can never be off by one', () => {
+    // The take-over writes pristine + our shim and then verifies by stripping. If apply/strip ever
+    // stop being exact inverses, a derived pristine would hash wrong and every take-over would roll
+    // back in the field - a failure that is invisible in any test that only compares hashes.
+    const { webT } = ourTargets();
+    const patched = applyToContent(WEB, webT);
+    expect(patched.indexOf(MARKER_PREFIX)).toBe(WEB.length + 1); // our own leading newline
+    expect(patched.startsWith(WEB)).toBe(true);
+  });
+
+  it('refuses a competitor backup carrying TWO of our blocks (double-patched: one strip is not enough)', () => {
+    const { webT } = ourTargets();
+    fs.writeFileSync(`${webFile}.kickbacks-backup`, applyToContent(applyToContent(WEB, webT), webT));
+    fs.writeFileSync(webFile, WEB + VIBE);
+    expect(client().lookup(BUILD)).toBeUndefined();
+  });
+
+  it('refuses a competitor backup whose Awaitful block is truncated (unstrippable → never guess)', () => {
+    fs.writeFileSync(`${webFile}.kickbacks-backup`, `${WEB}\n${MARKER_PREFIX} v25 */\n;(function(){})();`);
+    fs.writeFileSync(webFile, WEB + VIBE);
+    expect(client().lookup(BUILD)).toBeUndefined();
+  });
+
+  it('refuses a competitor backup carrying ours AND another tool block (residue is not pristine)', () => {
+    // Stripping ours leaves THEIRS. Nothing downstream can catch this: the recipe hash, the
+    // pre-write verify and the health probe would all agree with the contaminated value.
+    const { webT } = ourTargets();
+    fs.writeFileSync(`${webFile}.kickbacks-backup`, applyToContent(WEB, webT) + VIBE);
+    fs.writeFileSync(webFile, WEB + VIBE);
+    expect(client().lookup(BUILD)).toBeUndefined();
+  });
+
+  it('refuses to self-activate when the LIVE file carries ours AND another tool block', () => {
+    // This is the path that produced 49 competitor-contaminated backups on a real machine: strip
+    // ours, hash a residue that still contains theirs, store it as "the original".
+    const { webT } = ourTargets();
+    fs.writeFileSync(webFile, applyToContent(WEB, webT) + VIBE);
+    expect(client().lookup(BUILD)).toBeUndefined();
+  });
+
+  /**
+   * Vote eligibility must key on a foreign marker in the LIVE bytes, not on a leftover backup file.
+   * A competitor's sibling backup outlives the competitor: it survives its uninstall AND our
+   * take-over, so keying on it disenfranchised a machine permanently. On one real fleet this made
+   * more than half of all patch reports unable to vote, which is why no build ever reached quorum.
+   */
+  it('votes clean when the live files are clean, even with a competitor backup still on disk', () => {
+    const { webT } = ourTargets();
+    fs.writeFileSync(`${webFile}.kickbacks-backup`, applyToContent(WEB, webT)); // their leftover
+    fs.writeFileSync(webFile, WEB);                                            // ours took over, file is clean
+    fs.writeFileSync(extFile, EXT);
+
+    const posted: unknown[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = ((_u: string, init?: { body?: string }) => {
+      if (init?.body) posted.push(JSON.parse(init.body));
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    }) as unknown as typeof fetch;
+
+    try {
+      client().report('applied');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    expect(posted).toHaveLength(1);
+    expect((posted[0] as { clean: boolean }).clean).toBe(true);
+  });
+
+  it('votes NOT clean while another tool block is actually in the live file', () => {
+    fs.writeFileSync(webFile, WEB + VIBE);
+    fs.writeFileSync(extFile, EXT);
+
+    const posted: unknown[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = ((_u: string, init?: { body?: string }) => {
+      if (init?.body) posted.push(JSON.parse(init.body));
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    }) as unknown as typeof fetch;
+
+    try {
+      client().report('conflict');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    expect(posted).toHaveLength(1);
+    expect((posted[0] as { clean: boolean }).clean).toBe(false);
+  });
+
+  it('still self-activates cleanly once the competitor block is gone', () => {
+    const { webT } = ourTargets();
+    fs.writeFileSync(webFile, applyToContent(WEB, webT) + VIBE);
+    expect(client().lookup(BUILD)).toBeUndefined();
+    fs.writeFileSync(webFile, applyToContent(WEB, webT)); // competitor evicted by a take-over
+    const r = client().lookup(BUILD);
+    expect(r).toBeDefined();
+    expect(r!.targets[0]!.pristineSha256).toBe(sha256(WEB));
+  });
+});

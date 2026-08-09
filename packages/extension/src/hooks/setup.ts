@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { awaitfulDir, readClaudeSettings, writeClaudeSettings } from './claudeSettings.js';
+import { awaitfulDir, claudeSettingsExists, readClaudeSettings, writeClaudeSettings } from './claudeSettings.js';
 
 function portFile(): string {
   return path.join(awaitfulDir(), 'port');
@@ -57,6 +57,19 @@ function hookCommand(pathSuffix: string): string {
   return `{ _p=${portExpr} && curl -fsSL -m 2 -X POST "http://localhost:$_p${pathSuffix}" >/dev/null 2>&1; } ${HOOK_MARKER}`;
 }
 
+/**
+ * Publish the port the agent's thinking hooks should POST to.
+ *
+ * There is exactly one of these files and every window overwrites it, so the hooks always reach one
+ * host - the last one to write. That host is not necessarily the window the developer is working
+ * in, and a host that receives thinking events with no webview in view renders nothing while the
+ * window they ARE looking at never hears that the agent is thinking. Re-claiming on focus makes the
+ * file track the window the developer is actually using, which is the best available proxy for
+ * where the agent is running. The shim's `serving` preference then converges on the same host.
+ *
+ * Not a complete fix: two windows driven at once still share one file. The liveness ledger is what
+ * keeps that honest - a host with no shim reports `silent` and stops claiming to earn.
+ */
 export async function writePortFile(port: number): Promise<void> {
   await fs.promises.mkdir(path.dirname(portFile()), { recursive: true });
   await fs.promises.writeFile(portFile(), String(port), 'utf8');
@@ -79,6 +92,9 @@ export async function registerClaudeHooks(): Promise<void> {
 }
 
 export async function removeClaudeHooks(): Promise<void> {
+  // No settings file means no hooks of ours to remove — and writing one here would CREATE
+  // ~/.claude on a machine that has no Claude Code (this runs on every deactivate).
+  if (!claudeSettingsExists()) return;
   const settings = await readClaudeSettings();
   const hooksBlock = (settings.hooks ?? {}) as HooksBlock;
   for (const event of HOOK_EVENTS) {

@@ -16,6 +16,35 @@ describe('SurfaceSession', () => {
     return { s, events };
   }
 
+  /**
+   * Two open Claude Code webviews - two windows, or VS Code and Cursor side by side - both fetch
+   * the same creative and both post `visible {visibleMs:1000}` at 1 Hz. Without shim binding they
+   * accumulate into ONE counter, so view_threshold_met fires after half the visible time it claims
+   * to represent: billing for time nobody watched. Invisible in any single-window test.
+   */
+  it('does not double-accrue visible time when a SECOND shim beacons the same creative', () => {
+    const { s, events } = make(5000);
+    s.begin(CREATIVE);
+    s.rendered({ adId: CREATIVE.adId, slateId: CREATIVE.slateId, shimId: 'window-a' });
+    for (let i = 0; i < 3; i++) {
+      s.visible({ adId: CREATIVE.adId, slateId: CREATIVE.slateId, visibleMs: 1000, shimId: 'window-a' });
+      s.visible({ adId: CREATIVE.adId, slateId: CREATIVE.slateId, visibleMs: 1000, shimId: 'window-b' });
+    }
+    // Three seconds of real viewing, six beacons. The threshold is five seconds: it must not fire.
+    expect(events.filter((e) => e.type === 'view_threshold_met')).toHaveLength(0);
+    const ticks = events.filter((e) => e.type === 'view_tick');
+    expect(ticks[ticks.length - 1]?.visibleMs).toBe(3000);
+  });
+
+  it('ignores beacons from a shim other than the one that painted', () => {
+    const { s, events } = make();
+    s.begin(CREATIVE);
+    s.rendered({ adId: CREATIVE.adId, slateId: CREATIVE.slateId, shimId: 'window-a' });
+    s.rendered({ adId: CREATIVE.adId, slateId: CREATIVE.slateId, shimId: 'window-b' });
+    expect(events.filter((e) => e.type === 'impression_rendered')).toHaveLength(1);
+    expect(s.click({ adId: CREATIVE.adId, slateId: CREATIVE.slateId, shimId: 'window-b' })).toBeUndefined();
+  });
+
   it('bills NOTHING when no beacon ever arrives (golden rule 3)', () => {
     const { s, events } = make();
     s.begin(CREATIVE);
@@ -141,7 +170,7 @@ describe('HookServer', () => {
   afterEach(() => { server?.dispose(); server = undefined; });
 
   function start(overrides: { creative?: SurfaceCreative; terminalLine?: string | null } = {}) {
-    const rec = { start: 0, stop: 0, pause: 0, resume: 0, rendered: 0, visible: 0, click: 0, terminalTick: 0 };
+    const rec = { start: 0, stop: 0, pause: 0, resume: 0, rendered: 0, visible: 0, click: 0, terminalTick: 0, hello: 0, attest: 0 };
     const cbs = makeCallbacks(rec, overrides);
     server = new HookServer(cbs);
     return server.start().then((port) => ({ port, rec }));
@@ -152,7 +181,9 @@ describe('HookServer', () => {
     const res = await fetch(`http://127.0.0.1:${port}/surface/hello`);
     expect(res.status).toBe(200);
     expect(res.headers.get('access-control-allow-origin')).toBe('*');
-    expect(await res.json()).toEqual({ awaitful: true });
+    const hello = await res.json() as { awaitful: boolean; hostId: string; serving: boolean };
+    expect(hello.awaitful).toBe(true);
+    expect(hello.hostId).toMatch(/[0-9a-f-]{36}/); // identity, so beacons are attributable
   });
 
   it('returns the current creative, or 204 when none', async () => {
@@ -164,14 +195,42 @@ describe('HookServer', () => {
 
   it('dispatches rendered/visible/click beacons to the callbacks', async () => {
     const { port, rec } = await start();
+    // A real shim learns the host's identity from /surface/hello and echoes it on every beacon.
+    const hello = await (await fetch(`http://127.0.0.1:${port}/surface/hello?shim=s1&v=26`)).json() as { hostId: string };
     const post = (p: string) => fetch(`http://127.0.0.1:${port}${p}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ adId: 'ad-1', slateId: 'slate-1' }),
+      body: JSON.stringify({ adId: 'ad-1', slateId: 'slate-1', hostId: hello.hostId, shimId: 's1' }),
     });
     await post('/surface/rendered');
     await post('/surface/visible');
     await post('/surface/click');
     expect(rec).toMatchObject({ rendered: 1, visible: 1, click: 1 });
+  });
+
+  /**
+   * Every window's shim scans the same loopback range, so a shim can reach a host that did not
+   * issue its creative. Billing another window's impression is a golden-rule-3 violation, and it is
+   * invisible in any single-window test.
+   */
+  it('drops a beacon addressed to a DIFFERENT host', async () => {
+    const { port, rec } = await start();
+    await fetch(`http://127.0.0.1:${port}/surface/rendered`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ adId: 'ad-1', slateId: 'slate-1', hostId: 'some-other-window', shimId: 's9' }),
+    });
+    expect(rec.rendered).toBe(0);
+  });
+
+  it('records a shim hello and a no-anchor attestation', async () => {
+    const { port, rec } = await start();
+    const hello = await (await fetch(`http://127.0.0.1:${port}/surface/hello?shim=s1&v=26`)).json() as { hostId: string };
+    expect(rec.hello).toBe(1);
+    await fetch(`http://127.0.0.1:${port}/surface/attest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ stage: 'no-anchor', adId: 'ad-1', hostId: hello.hostId, shimId: 's1', v: 26 }),
+    });
+    // Attestation has no slateId, so it must dispatch ABOVE the billing beacons' adId/slateId gate.
+    expect(rec.attest).toBe(1);
   });
 
   it('dispatches thinking start/stop/pause/resume hooks to the callbacks', async () => {
@@ -214,7 +273,7 @@ describe('HookServer', () => {
 });
 
 function makeCallbacks(
-  rec: { start: number; stop: number; pause: number; resume: number; rendered: number; visible: number; click: number; terminalTick?: number },
+  rec: { start: number; stop: number; pause: number; resume: number; rendered: number; visible: number; click: number; terminalTick?: number; hello?: number; attest?: number },
   overrides: { creative?: SurfaceCreative; terminalLine?: string | null } = {},
 ) {
   return {
@@ -228,5 +287,7 @@ function makeCallbacks(
     onClick: () => { rec.click++; },
     getTerminalLine: () => overrides.terminalLine ?? null,
     onTerminalTick: () => { rec.terminalTick = (rec.terminalTick ?? 0) + 1; },
+    onShimHello: () => { rec.hello = (rec.hello ?? 0) + 1; },
+    onAttest: () => { rec.attest = (rec.attest ?? 0) + 1; },
   };
 }

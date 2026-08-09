@@ -2,8 +2,12 @@
   "name": "awaitful",
   "displayName": "Awaitful - Earn while your AI thinks",
   "description": "Earn while your AI agent thinks. A single sponsored line during thinking time, with revenue shared to you.",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "publisher": "awaitful",
+  "author": {
+    "name": "Awaitful LLC",
+    "url": "https://awaitful.com"
+  },
   "icon": "media/icon.png",
   "license": "MIT",
   "private": true,
@@ -19,22 +23,25 @@
     "vscode": "^1.90.0"
   },
   "categories": [
-    "Other",
-    "Machine Learning"
+    "Other"
   ],
   "keywords": [
+    "claude code",
+    "ai coding agent",
+    "passive income",
     "earn",
     "earnings",
-    "passive income",
+    "cursor",
     "monetize",
-    "revenue",
-    "waiting",
     "ai",
-    "claude",
-    "codex",
-    "coding agent",
-    "ads"
+    "ads",
+    "coding agent"
   ],
+  "galleryBanner": {
+    "color": "#163300",
+    "theme": "dark"
+  },
+  "pricing": "Free",
   "activationEvents": [
     "onStartupFinished",
     "onUri"
@@ -86,11 +93,6 @@
         "command": "awaitful.visitAd",
         "title": "Visit Sponsor",
         "category": "Awaitful"
-      },
-      {
-        "command": "awaitful.customizeAd",
-        "title": "Customize Ad",
-        "category": "Awaitful"
       }
     ],
     "configuration": {
@@ -117,12 +119,14 @@
             "none"
           ],
           "default": "claude",
-          "markdownDescription": "The animation shown before the sponsored line while your agent thinks, on every surface. Pick visually, with every spinner animating: [Open the Customize Ad picker](command:awaitful.customizeAd)."
+          "markdownDescription": "The animation shown before the sponsored line while your agent thinks. [Open the Awaitful panel](command:awaitful.openPanel).",
+          "markdownDeprecationMessage": "Each ad format now keeps its own spinner. This value still applies to any format you have not chosen one for. Pick per format, with every spinner animating, in [the Awaitful panel](command:awaitful.openPanel)."
         },
         "awaitful.adBrandLogo": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Show the advertiser's logo before the sponsored line. Not every ad carries one, and the status bar and terminal draw text only, so turning this on does not add a logo where there is none. The sponsored line itself always shows. [Open the Customize ad page](command:awaitful.customizeAd)."
+          "markdownDescription": "Show the advertiser's logo before the sponsored line. Not every ad carries one, and the status bar and terminal draw text only, so turning this on does not add a logo where there is none. The sponsored line itself always shows.",
+          "markdownDeprecationMessage": "Each ad format now keeps its own logo setting. This value still applies to any format you have not chosen one for. Pick per format in [the Awaitful panel](command:awaitful.openPanel)."
         }
       }
     }

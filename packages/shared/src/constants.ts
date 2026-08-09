@@ -125,6 +125,7 @@ export const LINKS = {
  */
 export const SOCIAL = [
   { id: 'x', label: 'X', href: 'https://x.com/Awaitful' },
+  { id: 'linkedin', label: 'LinkedIn', href: 'https://www.linkedin.com/company/awaitful/' },
   { id: 'bluesky', label: 'Bluesky', href: 'https://bsky.app/profile/awaitful.com' },
   { id: 'youtube', label: 'YouTube', href: 'https://www.youtube.com/@awaitful' },
   { id: 'reddit', label: 'Reddit', href: 'https://www.reddit.com/r/Awaitful' },
@@ -134,6 +135,17 @@ export const SOCIAL = [
 ] as const;
 
 export type SocialId = (typeof SOCIAL)[number]['id'];
+
+/**
+ * The registered legal entity behind the Awaitful brand. Surfaced as an understated trust signal - the
+ * footer copyright line, the operator / data controller named in the legal pages, and the email footer -
+ * from this ONE place so web and server never retype it. Kept minimal on purpose: just the name. A state
+ * of formation or a mailing address is added here only when it belongs (legal / contact context), never
+ * as a badge or a claim.
+ */
+export const COMPANY = {
+  legalName: 'Awaitful LLC',
+} as const;
 
 export const ERROR_CODES = {
   INVALID_EVENT_ID: 'INVALID_EVENT_ID',

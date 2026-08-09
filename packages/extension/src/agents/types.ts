@@ -10,13 +10,34 @@ import type { AgentId } from '@awaitful/shared';
  * Every method must preserve the user's other config, write atomically, and fail safe — these
  * touch the agent's own config files (golden rule 2). Reversibility is required: removeX fully
  * restores the pre-Awaitful state.
+ *
+ * **Install gates on presence; remove never does.** Every removeX is marker-scoped and guarded on
+ * the agent's settings file already existing, so it is always safe to call and always *desirable*
+ * to call — that is how entries an older build wrote get cleaned off a machine the agent has since
+ * left. Only the installX side asks whether the agent is here.
  */
 export interface AgentIntegration {
   readonly agent: AgentId;
   readonly label: string; // human name, e.g. "Claude Code"
 
-  /** Does this agent look usable/configurable on this machine? Gates whether we touch its config. */
-  isPresent(): Promise<boolean>;
+  /**
+   * Is this agent's OWN install (CLI/config) on this machine? Gates thinking hooks and the status
+   * line, and so gates every surface that bills off a thinking event — the status bar included,
+   * since it only earns because hooks fire.
+   *
+   * Must look for evidence the agent itself produced: never a path Awaitful writes, or the
+   * extension detects itself. Pure `fs` + `$PATH` — no `vscode` import (agents/* has to stay
+   * loadable under vitest's node environment) and no process spawn (nothing may delay activation).
+   */
+  detectCli(): Promise<boolean>;
+
+  /**
+   * The agent's VS Code extension id, when it has one. This is the *second* presence axis: it
+   * gates the surfaces that patch that extension's webview bundle, independently of detectCli().
+   * A terminal-only agent leaves it undefined. Resolved through a lookup the orchestrator injects
+   * (agents/presence.ts), so this file never imports `vscode`.
+   */
+  readonly editorExtensionId?: string;
 
   /**
    * Install thinking-detection so this agent's sessions report thinking start/stop/pause to the

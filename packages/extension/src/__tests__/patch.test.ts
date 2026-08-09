@@ -5,9 +5,13 @@ import * as path from 'node:path';
 import { sha256 } from '../patch/hash.js';
 import { BackupStore } from '../patch/backup.js';
 import {
+  extensionsOnDisk, extensionsElsewhere, obsoleteExtensionDirs, findClaudeTarget,
+} from '../patch/targets.js';
+import {
   PatchEngine, applyToContent, stripFromContent, hasOurPatch, type RecipeLookup,
 } from '../patch/engine.js';
-import { MARKER_START, MARKER_END, MARKER_PREFIX, findRecipe, assembleRecipe, GLOW_THEMES, type PatchRecipe, type RecipeTarget } from '../patch/recipe.js';
+import { MARKER_START, MARKER_END, MARKER_PREFIX, findRecipe, assembleRecipe, type PatchRecipe, type RecipeTarget } from '../patch/recipe.js';
+import { GLOW_THEMES } from '@awaitful/shared';
 import type { RecipeResponse } from '@awaitful/shared';
 
 // Two-target fixture: an append-shim webview + a csp-insert extension.js. The
@@ -111,47 +115,229 @@ describe('assess', () => {
     writePristine();
     expect(engine().assess().state).toBe('clean-pristine');
   });
-  it('unknown-build when no recipe matches', () => {
+  it('no-recipe when no recipe matches and the files are clean', () => {
     writePristine();
-    expect(engine(noRecipe).assess().state).toBe('unknown-build');
+    expect(engine(noRecipe).assess().state).toBe('no-recipe');
   });
   it('no-target when Claude Code is absent', () => {
     fs.rmSync(path.join(root, BUILD_ID), { recursive: true, force: true });
     expect(engine().assess().state).toBe('no-target');
   });
-  it('modified when EITHER target differs from pristine', () => {
+  it('unknown-modified when EITHER target differs from pristine with no marker', () => {
     writePristine();
     fs.writeFileSync(extFile, EXT + '\n// tweaked\n', 'utf8'); // only ext modified
-    expect(engine().assess().state).toBe('modified');
+    expect(engine().assess().state).toBe('unknown-modified');
   });
-  it('modified + resolves a name from a generic sibling backup', () => {
+
+  /**
+   * THE INCIDENT. A competitor holds the file on a build we have no recipe for. Recipe resolution
+   * used to run FIRST and return a single "we don't know this build" state, so the panel told the
+   * user their Claude Code version was unsupported and to wait for a release - while a competitor's
+   * ad rendered in the surface we were supposed to own. Custody is decided from the bytes now.
+   */
+  it('foreign-only, never no-recipe, when a competitor holds the file on an unknown build', () => {
+    writePristine();
+    fs.writeFileSync(webFile, WEB + '\n/* VIBE-ADS-START */x();/* VIBE-ADS-END */\n', 'utf8');
+    const a = engine(noRecipe).assess();
+    expect(a.state).toBe('foreign-only');
+    expect(a.foreign?.inFile).toBe(true);
+    expect(a.recoverable).toBe('unknown'); // no recipe, so we cannot even ask
+  });
+
+  it('ours-unverified, never no-recipe, when our marker is present on an unknown build', () => {
+    fs.writeFileSync(webFile, applyToContent(WEB, WEB_TARGET), 'utf8');
+    fs.writeFileSync(extFile, EXT, 'utf8');
+    expect(engine(noRecipe).assess().state).toBe('ours-unverified');
+  });
+
+  it('foreign-only + reports the token from a generic sibling backup', () => {
     writePristine();
     fs.writeFileSync(webFile, WEB + '\n/* OTHER-SHIM */\n', 'utf8');
     fs.writeFileSync(webFile + '.acmeads-backup', WEB, 'utf8');
     const a = engine().assess();
-    expect(a.state).toBe('modified');
-    expect(a.foreign?.vendor).toBe('Acmeads');
+    expect(a.state).toBe('unknown-modified'); // no in-file marker: we accuse nobody
   });
-  it('modified + names the modifier from its OWN in-file patch marker (no sibling backup)', () => {
+
+  it('foreign-only + reports the token from an in-file marker (no sibling backup)', () => {
     writePristine();
-    // A competitor that appends a marker-wrapped shim but keeps its backup elsewhere.
     fs.writeFileSync(webFile, WEB + '\n/* CODECUE-START v19 */ globalThis.x=1; /* CODECUE-END */\n', 'utf8');
     const a = engine().assess();
-    expect(a.state).toBe('modified');
-    // No matching install here, so it falls back to the raw marker token; in the field
-    // resolveVendorName maps "codecue" → the installed extension's display name ("CodeCue").
-    expect(a.foreign?.vendor).toBe('CODECUE');
+    expect(a.state).toBe('foreign-only');
+    expect(a.foreign?.token).toBe('CODECUE');
+    // Nothing by that name is installed in this fixture, so we must NOT claim a vendor.
+    expect(a.foreign?.vendorInstalled).not.toBe('yes');
+    expect(a.foreign?.vendor).toBeUndefined();
   });
+
+  it('names a vendor only when that extension is actually installed', () => {
+    writePristine();
+    fs.writeFileSync(webFile, WEB + '\n/* CODECUE-START v19 */x();/* CODECUE-END */\n', 'utf8');
+    const withInstall = new PatchEngine(
+      new BackupStore(storageDir), lookup, () => path.join(root, BUILD_ID),
+      (token) => (token.toLowerCase() === 'codecue' ? { id: 'acme.codecue', label: 'CodeCue', active: true } : undefined),
+    );
+    const a = withInstall.assess();
+    expect(a.foreign?.vendorInstalled).toBe('yes');
+    expect(a.foreign?.vendor).toBe('CodeCue');
+    expect(a.foreign?.vendorId).toBe('acme.codecue');
+  });
+
+  /**
+   * Switched off is not gone. VS Code's extension API lists only ENABLED extensions, so a tool the
+   * developer merely disabled looked identical to one they had removed - and the panel quoted a raw
+   * marker token at someone whose extension was sitting right there in their list. Its change is
+   * still in the file either way, so this state has to be nameable and actionable.
+   */
+  it('tells a disabled extension apart from an uninstalled one', () => {
+    writePristine();
+    fs.writeFileSync(webFile, WEB + '\n/* CODECUE-START v19 */x();/* CODECUE-END */\n', 'utf8');
+    const withDisabled = new PatchEngine(
+      new BackupStore(storageDir), lookup, () => path.join(root, BUILD_ID),
+      (token) => (token.toLowerCase() === 'codecue' ? { id: 'acme.codecue', label: 'CodeCue', active: false } : undefined),
+    );
+    const a = withDisabled.assess();
+    expect(a.foreign?.vendorInstalled).toBe('disabled');
+    expect(a.foreign?.vendor).toBe('CodeCue');   // still nameable: it is right there on disk
+  });
+
+  /**
+   * A copy installed for a DIFFERENT editor is neither gone nor switched off, and calling it either
+   * is what made the repair unwinnable.
+   *
+   * Measured on a real machine: a patch tool installed only in VSCodium re-patched a Claude Code
+   * that had just been installed into VS Code, within a minute, because it walks $HOME and edits the
+   * agent wherever it finds it. From VS Code's own registry the tool looked uninstalled, so every
+   * step said "removed", the file kept changing back, and the checklist sent the developer round the
+   * reinstall loop with the actual fix sitting in another application.
+   */
+  it('tells a copy in another editor apart from one that is gone', () => {
+    writePristine();
+    fs.writeFileSync(webFile, WEB + '\n/* CODECUE-START v19 */x();/* CODECUE-END */\n', 'utf8');
+    const far = new PatchEngine(
+      new BackupStore(storageDir), lookup, () => path.join(root, BUILD_ID),
+      (token) => (token.toLowerCase() === 'codecue'
+        ? { id: 'acme.codecue', label: 'CodeCue', active: false, host: { label: 'Cursor', dir: '/home/dev/.cursor/extensions' } }
+        : undefined),
+    );
+    const a = far.assess();
+    expect(a.foreign?.vendorInstalled).toBe('elsewhere');
+    expect(a.foreign?.vendorHost?.label).toBe('Cursor');
+    // Nameable, and it has to be: "another editor" does not tell you which one to go and open.
+    expect(a.foreign?.vendor).toBe('CodeCue');
+  });
+
+  it('a file carrying our block AND a foreign block is ours-plus-foreign, never ours', () => {
+    // The silent-failure case: our marker is present, so the old substring test called this healthy
+    // and the panel showed the surface as active while the competitor's line rendered instead.
+    fs.writeFileSync(webFile, applyToContent(WEB, WEB_TARGET) + '\n/* VIBE-ADS-START */x();/* VIBE-ADS-END */\n', 'utf8');
+    fs.writeFileSync(extFile, applyToContent(EXT, EXT_TARGET), 'utf8');
+    expect(engine().assess().state).toBe('ours-plus-foreign');
+  });
+
+  it('our block over bytes that no longer strip to pristine is ours-plus-unknown', () => {
+    // A competitor that does NOT wrap its work in a marker. Marker-only detection is a one-string
+    // bypass for anyone who wants it, so the hash has to carry this case.
+    fs.writeFileSync(webFile, applyToContent(WEB + '\n// silent edit\n', WEB_TARGET), 'utf8');
+    fs.writeFileSync(extFile, applyToContent(EXT, EXT_TARGET), 'utf8');
+    expect(engine().assess().state).toBe('ours-plus-unknown');
+  });
+
+  it('an unreadable target with no marker anywhere is unreadable, not a modification claim', () => {
+    writePristine();
+    fs.rmSync(extFile);
+    const a = engine().assess();
+    expect(a.state).toBe('unreadable');
+    expect(a.errno).toBe('ENOENT');
+  });
+
+  it('a foreign marker on one target outranks an unreadable sibling', () => {
+    // Otherwise a hostile tool could hide itself by making the OTHER target unreadable.
+    writePristine();
+    fs.writeFileSync(webFile, WEB + '\n/* VIBE-ADS-START */x();/* VIBE-ADS-END */\n', 'utf8');
+    fs.rmSync(extFile);
+    expect(engine().assess().state).toBe('foreign-only');
+  });
+
   it('never attributes OUR OWN marker as a foreign modifier', () => {
     writePristine();
-    // A file carrying our marker at an unexpected hash is ours-stale, never a "competitor".
+    // A file carrying our marker at an unexpected hash is ours-plus-unknown, never a "competitor".
     fs.writeFileSync(webFile, WEB + `\n${MARKER_START} tampered ${MARKER_END}\n`, 'utf8');
     const a = engine().assess();
     expect(a.foreign?.vendor).toBeUndefined();
+    expect(a.state).toBe('ours-plus-unknown');
   });
 });
 
 // ── apply ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Uninstalling an extension does not delete its folder. VS Code records the name in `.obsolete` and
+ * sweeps the bytes later, once no window is holding them - so a scan that trusts directory names
+ * alone reports removed tools as installed. That is what stopped the conflict checklist from ever
+ * ticking after a successful uninstall, and made a working button look broken.
+ */
+describe('.obsolete: uninstalled is not the same as still on disk', () => {
+  const markObsolete = (...names: string[]) => {
+    const o: Record<string, boolean> = {};
+    for (const n of names) o[n] = true;
+    fs.writeFileSync(path.join(root, '.obsolete'), JSON.stringify(o), 'utf8');
+  };
+  const mkExt = (name: string) => fs.mkdirSync(path.join(root, name), { recursive: true });
+
+  /**
+   * The registry is the only trustworthy answer to "is this installed?", and it outranks both the
+   * folder and `.obsolete`.
+   *
+   * Measured on a real machine: an uninstalled extension had its folder intact, an EMPTY `.obsolete`,
+   * and no registry entry. Trusting the folder reported it as merely switched off, so the repair
+   * checklist told the developer to turn off something they had already removed, and its step never
+   * ticked - the flow simply stalled there.
+   */
+  it('believes the registry over a folder VS Code has not swept yet', () => {
+    mkExt('acme.codecue-1.2.3');
+    mkExt('other.tool-1.0.0');
+    fs.writeFileSync(path.join(root, 'extensions.json'), JSON.stringify([
+      { identifier: { id: 'other.tool' }, relativeLocation: 'other.tool-1.0.0' },
+    ]), 'utf8');
+    const ids = extensionsOnDisk().map(e => e.id);
+    expect(ids).toContain('other.tool');
+    expect(ids, 'a swept-pending folder counts as installed').not.toContain('acme.codecue');
+  });
+
+  it('falls back to folders when there is no registry to read', () => {
+    mkExt('acme.codecue-1.2.3');
+    expect(extensionsOnDisk().map(e => e.id)).toContain('acme.codecue');
+    fs.writeFileSync(path.join(root, 'extensions.json'), 'not json', 'utf8');
+    expect(extensionsOnDisk().map(e => e.id)).toContain('acme.codecue');
+  });
+
+  it('leaves an uninstalled extension out of the on-disk set', () => {
+    mkExt('acme.codecue-1.2.3');
+    expect(extensionsOnDisk().map(e => e.id)).toContain('acme.codecue');
+    markObsolete('acme.codecue-1.2.3');
+    expect(extensionsOnDisk().map(e => e.id)).not.toContain('acme.codecue');
+  });
+
+  it('reads an absent or unreadable .obsolete as "nothing is obsolete"', () => {
+    expect(obsoleteExtensionDirs().size).toBe(0);
+    fs.writeFileSync(path.join(root, '.obsolete'), 'not json at all', 'utf8');
+    expect(obsoleteExtensionDirs().size).toBe(0);
+    mkExt('acme.codecue-1.2.3');
+    expect(extensionsOnDisk().map(e => e.id)).toContain('acme.codecue');
+  });
+
+  /**
+   * After an update the previous build sits there until VS Code sweeps it. Picking it would write
+   * into bytes nothing loads, and report patch health for a build that is not running.
+   */
+  it('never picks an uninstalled Claude Code build, however high its version', () => {
+    fs.mkdirSync(path.join(root, 'anthropic.claude-code-9.9.9', 'webview'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'anthropic.claude-code-9.9.9', 'webview', 'index.js'), 'x', 'utf8');
+    expect(findClaudeTarget()?.version).toBe('9.9.9');
+    markObsolete('anthropic.claude-code-9.9.9');
+    expect(findClaudeTarget()?.version).not.toBe('9.9.9');
+  });
+});
 
 describe('apply', () => {
   it('patches BOTH targets and passes health probes', () => {
@@ -240,6 +426,23 @@ describe('apply', () => {
     expect(stripFromContent(readFile(extFile), EXT_TARGET)).toBe(EXT);
   });
 
+  it('take-over from a sibling backup that carries OUR OWN block succeeds (they backed up our patched file)', () => {
+    // A competitor that installs AFTER us saves its "original" from the file we already patched.
+    // Refusing that backup strands the user with the competitor's shim and no way to evict it; the
+    // strip is byte-exact and the result is still accepted only on a hash match against pristine.
+    fs.writeFileSync(webFile, WEB + '\n/* OTHER-SHIM */\n', 'utf8');
+    fs.writeFileSync(webFile + '.other-backup', applyToContent(WEB, WEB_TARGET), 'utf8');
+    fs.writeFileSync(extFile, EXT, 'utf8');
+    const a = engine().assess();
+    expect(a.state).toBe('unknown-modified');
+    expect(a.recoverable).toBe('yes');
+    const res = engine().apply(true);
+    expect(res.ok).toBe(true);
+    expect(readFile(webFile)).toContain(MARKER_START);
+    expect(readFile(webFile)).not.toContain('OTHER-SHIM');       // the competitor's block is evicted
+    expect(stripFromContent(readFile(webFile), WEB_TARGET)).toBe(WEB); // and pristine is exactly pristine
+  });
+
   it('take-over still REFUSES a sibling backup that does NOT hash to pristine', () => {
     const moddedWeb = WEB + '\n/* OTHER */\n';
     fs.writeFileSync(webFile, moddedWeb, 'utf8');
@@ -256,8 +459,8 @@ describe('apply', () => {
     fs.writeFileSync(webFile + '.other-backup', WEB, 'utf8');
     fs.writeFileSync(extFile, EXT, 'utf8');
     const a = engine().assess();
-    expect(a.state).toBe('modified');
-    expect(a.recoverable).toBe(true);
+    expect(a.state).toBe('unknown-modified');
+    expect(a.recoverable).toBe('yes');
   });
 });
 
@@ -345,7 +548,7 @@ describe('restore', () => {
     writePristine();
     const eng = engine();
     eng.apply();
-    expect(eng.restore()).toEqual({ ok: true, changed: true, assessed: true });
+    expect(eng.restore()).toMatchObject({ ok: true, changed: true, assessed: true });
     expect(readFile(webFile)).toBe(WEB);
     expect(readFile(extFile)).toBe(EXT);
   });
@@ -354,7 +557,7 @@ describe('restore', () => {
     const other = EXT + '\n// other ext\n';
     fs.writeFileSync(webFile, WEB, 'utf8');
     fs.writeFileSync(extFile, other, 'utf8');
-    expect(engine().restore()).toEqual({ ok: true, changed: false, assessed: true });
+    expect(engine().restore()).toMatchObject({ ok: true, changed: false, assessed: true });
     expect(readFile(extFile)).toBe(other);
   });
 
@@ -363,7 +566,7 @@ describe('restore', () => {
     const eng = engine();
     eng.apply();
     for (const f of fs.readdirSync(storageDir)) fs.rmSync(path.join(storageDir, f));
-    expect(eng.restore()).toEqual({ ok: true, changed: true, assessed: true });
+    expect(eng.restore()).toMatchObject({ ok: true, changed: true, assessed: true });
     expect(readFile(webFile)).toBe(WEB);
     expect(readFile(extFile)).toBe(EXT);
   });
@@ -378,6 +581,184 @@ describe('restore', () => {
 
   it('reports assessed:true when a recipe resolves and no patch of ours is present', () => {
     writePristine();
-    expect(engine().restore()).toEqual({ ok: true, changed: false, assessed: true });
+    expect(engine().restore()).toMatchObject({ ok: true, changed: false, assessed: true });
+  });
+
+  it('KEEPS our backup when a competitor has patched over us (it is the only pristine left)', () => {
+    // restore() drops the stored backup for any target no longer carrying our marker. When a
+    // competitor overwrote us, that backup is the machine's last copy of pristine - deleting it
+    // turns a recoverable conflict into one that needs a full Claude Code reinstall.
+    const store = new BackupStore(storageDir);
+    store.save(BUILD_ID, WEB_TARGET.pristineSha256, Buffer.from(WEB, 'utf8'));
+    fs.writeFileSync(webFile, WEB + '\n/* OTHER-SHIM */\n', 'utf8');
+    fs.writeFileSync(extFile, EXT, 'utf8');
+
+    engine().restore();
+    expect(store.read(BUILD_ID, WEB_TARGET.pristineSha256)?.toString('utf8')).toBe(WEB);
+  });
+
+  it('still drops the backup when the file is genuinely pristine again (nothing left to recover)', () => {
+    const store = new BackupStore(storageDir);
+    store.save(BUILD_ID, WEB_TARGET.pristineSha256, Buffer.from(WEB, 'utf8'));
+    writePristine();
+    engine().restore();
+    expect(store.read(BUILD_ID, WEB_TARGET.pristineSha256)).toBeUndefined();
+  });
+});
+
+describe('BackupStore hygiene', () => {
+  it('refuses to store bytes carrying another tool marker, whatever hash the caller claims', () => {
+    // The caller's hash gate cannot catch this: when the RECIPE itself was self-derived from
+    // contaminated content, the hash matches because it is the hash of the contamination. One field
+    // machine accumulated 49 such "originals" (233 MB) this way.
+    const store = new BackupStore(storageDir);
+    const dirty = Buffer.from(`${WEB}/* VIBE-ADS-START */x();/* VIBE-ADS-END */\n`, 'utf8');
+    store.save(BUILD_ID, sha256(dirty), dirty);
+    expect(store.read(BUILD_ID, sha256(dirty))).toBeUndefined();
+  });
+
+  it('stores clean pristine', () => {
+    const store = new BackupStore(storageDir);
+    expect(store.save(BUILD_ID, WEB_TARGET.pristineSha256, Buffer.from(WEB, 'utf8'))).toBe(true);
+    expect(store.read(BUILD_ID, WEB_TARGET.pristineSha256)?.toString('utf8')).toBe(WEB);
+  });
+
+  it('refuses bytes carrying OUR OWN marker - a "pristine" containing our patch is not pristine', () => {
+    // foreignMarkerToken deliberately skips AWAITFUL so we never accuse ourselves of being a
+    // competitor, which means our own block would otherwise pass the foreign check untouched.
+    const store = new BackupStore(storageDir);
+    const ours = Buffer.from(applyToContent(WEB, WEB_TARGET), 'utf8');
+    expect(store.save(BUILD_ID, sha256(ours), ours)).toBe(false);
+    expect(store.read(BUILD_ID, sha256(ours))).toBeUndefined();
+  });
+
+  it('purgeContaminated removes marked backups and keeps the one genuine original', () => {
+    const store = new BackupStore(storageDir);
+    store.save(BUILD_ID, WEB_TARGET.pristineSha256, Buffer.from(WEB, 'utf8')); // the clean one
+    for (let i = 0; i < 5; i++) {
+      // Written directly: these are the shape save() now refuses, but older builds stored them.
+      const dirty = `${WEB}// round ${i}\n/* VIBE-ADS-START */x();/* VIBE-ADS-END */\n`;
+      fs.writeFileSync(path.join(storageDir, `${BUILD_ID}.${sha256(dirty)}.bak`), dirty);
+    }
+    expect(store.purgeContaminated(BUILD_ID)).toBe(5);
+    expect(store.read(BUILD_ID, WEB_TARGET.pristineSha256)?.toString('utf8')).toBe(WEB);
+  });
+
+  it('pruneExcept never deletes when the keep set is empty (a wrong root is not a licence to delete)', () => {
+    const store = new BackupStore(storageDir);
+    store.save(BUILD_ID, WEB_TARGET.pristineSha256, Buffer.from(WEB, 'utf8'));
+    store.pruneExcept(new Set());
+    expect(store.read(BUILD_ID, WEB_TARGET.pristineSha256)).toBeDefined();
+  });
+
+  it('caps backups per build so a patch war cannot leak unbounded disk', () => {
+    const store = new BackupStore(storageDir);
+    for (let i = 0; i < 20; i++) {
+      const bytes = Buffer.from(`${WEB}// derivation ${i}\n`, 'utf8');
+      store.save(BUILD_ID, sha256(bytes), bytes);
+    }
+    const mine = fs.readdirSync(storageDir).filter((n) => n.startsWith(BUILD_ID + '.'));
+    expect(mine.length).toBeLessThanOrEqual(8);
+  });
+});
+
+/**
+ * An extension is installed into ONE editor, but it is not confined to one.
+ *
+ * A patch tool reads $HOME and edits the agent's files wherever it finds them, so a copy living in
+ * a different editor changes the very bytes this window loads. Reading only our own registry made
+ * that copy invisible: the panel found a marker in the file, matched it against nothing, and
+ * concluded the tool was gone - so it told the developer to reinstall Claude Code, which the other
+ * editor patched again within the minute.
+ */
+describe('other editors on the same machine', () => {
+  let home: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    prevHome = process.env['HOME'];
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'awaitful-home-'));
+    process.env['HOME'] = home;
+    // Ours, and therefore never reported as somewhere else.
+    process.env['AWAITFUL_VSCODE_EXT_DIR'] = path.join(home, '.vscode', 'extensions');
+  });
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env['HOME']; else process.env['HOME'] = prevHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const editor = (dot: string, entries: { id: string; dir: string }[]) => {
+    const root = path.join(home, dot, 'extensions');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'extensions.json'), JSON.stringify(
+      entries.map((e) => ({ identifier: { id: e.id }, relativeLocation: e.dir })),
+    ), 'utf8');
+    return root;
+  };
+
+  it('finds an extension installed for a different editor', () => {
+    editor('.vscode', [{ id: 'awaitful.awaitful', dir: 'awaitful.awaitful-0.7.4' }]);
+    editor('.vscode-oss', [{ id: 'acme.codecue', dir: 'acme.codecue-2.3.1' }]);
+    const far = extensionsElsewhere();
+    expect(far.map((e) => e.id)).toEqual(['acme.codecue']);
+    expect(far[0]!.editor).toBe('VSCodium');
+    expect(far[0]!.root).toBe(path.join(home, '.vscode-oss', 'extensions'));
+  });
+
+  // Our own editor is where the ordinary remove button works. Reporting it as "somewhere else"
+  // would send the developer out of the application that can actually fix it.
+  it('never reports this window’s own editor as another one', () => {
+    editor('.vscode', [{ id: 'acme.codecue', dir: 'acme.codecue-2.3.1' }]);
+    expect(extensionsElsewhere()).toEqual([]);
+    expect(extensionsOnDisk().map((e) => e.id)).toContain('acme.codecue');
+  });
+
+  /**
+   * Registry only, no folder fallback. For another editor we cannot watch `.obsolete` being swept or
+   * a window holding bytes open, so a leftover folder there would raise an alarm about a tool the
+   * developer has already removed - and send them to quit an application for no reason.
+   */
+  it('ignores a directory with no registry in it', () => {
+    fs.mkdirSync(path.join(home, '.cursor', 'extensions', 'acme.codecue-2.3.1'), { recursive: true });
+    expect(extensionsElsewhere()).toEqual([]);
+  });
+
+  /**
+   * A fork we have never heard of still gets a name a developer recognises. Nobody has an
+   * application called ".some-forked-editor", so telling someone to go and quit one is telling them
+   * to decode a directory listing.
+   */
+  it('names an unknown editor the way a person would say it', () => {
+    editor('.some-forked-editor', [{ id: 'acme.codecue', dir: 'acme.codecue-2.3.1' }]);
+    expect(extensionsElsewhere()[0]?.editor).toBe('Some Forked Editor');
+  });
+
+  /**
+   * An editor drops the registry entry the instant you uninstall and sweeps the folder only at its
+   * next start - so between those two moments the extension is loaded and still doing its job.
+   * Registry-only detection called that "gone", the flow fell back to the ordinary repair, and the
+   * file kept changing back from an application we had just stopped mentioning.
+   */
+  it('sees an extension uninstalled elsewhere but not yet swept', () => {
+    const root = editor('.cursor', []);
+    fs.mkdirSync(path.join(root, 'acme.codecue-2.3.1'), { recursive: true });
+    const far = extensionsElsewhere();
+    expect(far.map((e) => e.id)).toEqual(['acme.codecue']);
+    expect(far[0]!.pendingRemoval).toBe(true);
+    // The extension's OWN folder, not the editor's: it is what to delete and what to reveal.
+    expect(far[0]!.dir).toBe(path.join(root, 'acme.codecue-2.3.1'));
+  });
+
+  it('does not call a listed extension pending removal', () => {
+    const root = editor('.cursor', [{ id: 'acme.codecue', dir: 'acme.codecue-2.3.1' }]);
+    fs.mkdirSync(path.join(root, 'acme.codecue-2.3.1'), { recursive: true });
+    const far = extensionsElsewhere();
+    expect(far).toHaveLength(1);
+    expect(far[0]!.pendingRemoval).toBe(false);
+  });
+
+  it('survives a home directory it cannot read', () => {
+    process.env['HOME'] = path.join(home, 'nope');
+    expect(extensionsElsewhere()).toEqual([]);
   });
 });

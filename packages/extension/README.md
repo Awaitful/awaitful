@@ -2,6 +2,10 @@
 
 Earn while your AI agent thinks.
 
+[![VS Code Marketplace](https://img.shields.io/badge/VS%20Code%20Marketplace-Install-0098FF?logo=visualstudiocode&logoColor=white)](https://marketplace.visualstudio.com/items?itemName=awaitful.awaitful)
+[![Open VSX Version](https://img.shields.io/open-vsx/v/awaitful/awaitful?label=Open%20VSX)](https://open-vsx.org/extension/awaitful/awaitful)
+[![Open VSX Downloads](https://img.shields.io/open-vsx/dt/awaitful/awaitful?label=downloads)](https://open-vsx.org/extension/awaitful/awaitful)
+
 Awaitful shows a single, tasteful sponsored line during the seconds your AI coding agent spends "thinking", and shares the revenue with you. No pop-ups, no tracking of your work, no clutter. One line, only while you are already waiting. It is a quiet way to turn unavoidable wait time into passive income.
 
 ## How it works
@@ -23,17 +27,17 @@ Awaitful can present its one line wherever fits your setup. You pick one in the 
 
 ![Status bar: a single sponsored line at the right end of the VS Code status bar](https://awaitful.com/extension/surface-status-bar.png)
 
-![Thinking-line: the sponsored line shown in place of the agent's thinking spinner](https://awaitful.com/extension/surface-thinking-line.png)
+![Thinking line: the sponsored line shown in place of the agent's thinking spinner](https://awaitful.com/extension/surface-thinking-line.png)
 
 ![Chat banner: a sponsored banner docked above the composer while the agent thinks](https://awaitful.com/extension/surface-chat-banner.png)
 
 ![Terminal status line: a sponsored line in the terminal while the agent thinks](https://awaitful.com/extension/surface-terminal.png)
 
-The extension fails safe: if it cannot place a line cleanly, it simply shows nothing.
+The extension fails safe. If it cannot place a line cleanly it shows nothing, falls back to the status bar, and tells you why. Other extensions can modify the same Claude Code files; when one does, Awaitful stops rather than stack a second change on top, names the tool where it can, and offers to put back Claude Code's original.
 
 ## Getting started
 
-1. Install the extension.
+1. Install Awaitful: one command with `npx awaitful` (it finds your editor), or from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=awaitful.awaitful) or [Open VSX](https://open-vsx.org/extension/awaitful/awaitful) for Cursor, Devin, and VSCodium.
 2. Open the Awaitful panel and choose "Link this machine".
 3. Approve the link in your browser (email, Google, or GitHub).
 4. That is all. Awaitful runs quietly and earns while you work.
@@ -63,3 +67,7 @@ Open the Command Palette and search "Awaitful":
 ## License
 
 Licensed under the MIT License.
+
+---
+
+Awaitful is a product of Awaitful LLC.

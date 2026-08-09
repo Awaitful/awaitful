@@ -17,6 +17,7 @@
  */
 
 import type { RecipeResponse } from '@awaitful/shared';
+import { GLOW_KEYFRAMES, GLOW_THEMES } from '@awaitful/shared';
 
 export type PatchStrategy = 'append-shim' | 'csp-insert';
 
@@ -55,7 +56,7 @@ export interface PatchRecipe {
 // v25: hover link cue (underline + trailing arrow on hover, not at rest), a width-gated timer, a
 // fade-in on first appearance, and the new default 'signal' glow theme - all become PATCHED BYTES,
 // so the bump makes already-patched editors re-apply.
-export const SHIM_VERSION = 25;
+export const SHIM_VERSION = 27;
 export const MARKER_PREFIX = '/* AWAITFUL-START';
 export const MARKER_START = `${MARKER_PREFIX} v${SHIM_VERSION} */`;
 export const MARKER_END = '/* AWAITFUL-END */';
@@ -79,55 +80,9 @@ export interface ShimConfig {
   themeKeyframes: string;
 }
 
-/** A chat-banner glow style. The animation CODE lives in the shim's `THEMES` registry
- * (source-available — "read exactly what runs"); this is the id + label the UI offers and
- * the host validates a preference against. Adding a theme means an entry in BOTH places. */
-// The chat-banner glow themes — the SINGLE source of truth. Each theme's live CSS (background +
-// animation) is injected into the shim via ShimConfig.themes AND drives the panel's animated preview,
-// so the preview always matches what renders. Add a theme = one entry here. `id` travels to the shim
-// via the creative's `bannerStyle`; the shim ships the animation, the server/pref ships only the id.
-const ANGLE_KF = "@property --cc-a{syntax:'<angle>';inherits:false;initial-value:0deg}@keyframes cc-spin{to{--cc-a:360deg}}";
-const BREATHE_KF = "@keyframes cc-breathe{0%,100%{opacity:.28}50%{opacity:1}}";
-/** All glow @keyframes/@property — injected once, into both the shim and the panel preview. */
-export const GLOW_KEYFRAMES = ANGLE_KF + BREATHE_KF;
-
-export interface GlowTheme {
-  id: string;
-  label: string;
-  /** Simplified static gradient for the tiny picker chip. */
-  swatch: string;
-  /** The live glow-ring background. */
-  background: string;
-  /** The animation shorthand (references a name in GLOW_KEYFRAMES). */
-  animation: string;
-}
-export const GLOW_THEMES: readonly GlowTheme[] = [
-  // Awaitful's own: signal-green sweeping through the brand's ground green. The default, so a fresh
-  // install glows on-brand. Brand hex lives ONLY here (single source), like every other theme.
-  { id: 'signal', label: 'Signal', swatch: 'linear-gradient(90deg,#163300,#4ade80,#9fe870)',
-    background: 'conic-gradient(from var(--cc-a),#9fe870,#4ade80,#163300,#4ade80,#9fe870)', animation: 'cc-spin 5s linear infinite' },
-  { id: 'aurora', label: 'Aurora', swatch: 'linear-gradient(90deg,#38bdf8,#818cf8,#c084fc)',
-    background: 'conic-gradient(from var(--cc-a),#38bdf8,#818cf8,#c084fc,#38bdf8)', animation: 'cc-spin 5s linear infinite' },
-  { id: 'comet', label: 'Comet', swatch: 'linear-gradient(90deg,#0b1220,#7dd3fc,#e0f2fe)',
-    background: 'conic-gradient(from var(--cc-a),#e0f2fe 0deg,rgba(125,211,252,0.55) 10deg,rgba(125,211,252,0.08) 34deg,transparent 62deg,transparent 360deg)', animation: 'cc-spin 2.4s linear infinite' },
-  { id: 'breathing', label: 'Breathing', swatch: 'linear-gradient(90deg,#5eead4,#38bdf8,#818cf8)',
-    background: 'linear-gradient(90deg,#5eead4,#38bdf8,#818cf8)', animation: 'cc-breathe 3.6s ease-in-out infinite' },
-  { id: 'chameleon', label: 'Chameleon', swatch: 'linear-gradient(90deg,var(--vscode-focusBorder,#3794ff),var(--vscode-charts-purple,#b180ff),var(--vscode-charts-green,#89d185))',
-    background: 'conic-gradient(from var(--cc-a),var(--vscode-focusBorder,#3794ff),var(--vscode-charts-purple,#b180ff),var(--vscode-charts-green,#89d185),var(--vscode-focusBorder,#3794ff))', animation: 'cc-spin 6s linear infinite' },
-  { id: 'rainbow', label: 'Rainbow', swatch: 'linear-gradient(90deg,#ff5f6d,#ffc371,#47e891,#3aa3ff,#a55eea)',
-    background: 'conic-gradient(from var(--cc-a),#ff5f6d,#ffc371,#47e891,#3aa3ff,#a55eea,#ff5f6d)', animation: 'cc-spin 6s linear infinite' },
-  { id: 'ember', label: 'Ember', swatch: 'linear-gradient(90deg,#ff6a00,#ff2d55,#ffb347)',
-    background: 'conic-gradient(from var(--cc-a),#ff6a00,#ff2d55,#ffb347,#ff6a00)', animation: 'cc-spin 5s linear infinite' },
-];
-export const DEFAULT_GLOW_THEME = 'signal';
-
-/** The outline frame: how far the glow extends. Orthogonal to the colour theme. */
-export interface BannerFrame { id: string; label: string; }
-export const BANNER_FRAMES: readonly BannerFrame[] = [
-  { id: 'banner', label: 'Banner' },   // outline the ad only, sides aligned with the chat box
-  { id: 'full', label: 'Full box' },   // one continuous outline around the ad + chat box
-];
-export const DEFAULT_BANNER_FRAME = 'banner';
+// GLOW_KEYFRAMES / GLOW_THEMES (and DEFAULT_GLOW_THEME / BANNER_FRAMES / DEFAULT_BANNER_FRAME, used
+// by orchestrator.ts) now live in @awaitful/shared - the single source of truth for the shim, the
+// panel preview, AND the web dashboard's own picker. Adding a theme or frame is one entry there.
 
 /** Per-theme live CSS injected into the shim (id → background/animation). */
 const SHIM_THEMES: Record<string, { background: string; animation: string }> =
@@ -204,6 +159,13 @@ const THINKING_SHIM = String.raw`
     // Below this row/composer width, the elapsed timer is hidden so it can't crowd the ad text.
     var TIMER_MIN = 260;
 
+    // Identity for THIS shim instance and the host it bound to. Every window's shim scans the same
+    // loopback range, so without these the host cannot tell two webviews apart - and two of them
+    // beaconing the same creative would bill one impression twice as fast as it was watched.
+    var SHIM_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    var SHIM_V = /*SHIMV*/;
+    var hostId = null, noHostUntil = 0;
+
     var origin = null, current = null, overlay = null, faceEl = null, glowEl = null;
     var iconEl = null, textEl = null, timerEl = null, arrowEl = null, lastEl = null, spinEl = null;
     // Fade-in is disabled under reduced motion; read once (cheap, stable for the session). Distinct
@@ -238,14 +200,33 @@ const THINKING_SHIM = String.raw`
     }
 
     // ---- host discovery (loopback port scan) ------------------------------
-    function tryPorts(i, done) {
-      if (i >= PORT_SPAN) { done(null); return; }
+    // Scan every port and PREFER a host that is actually being driven ("serving"). Latching the
+    // first responder is what left multi-window users at $0: window B's shim would bind window A's
+    // host, so A had the thinking hooks with no webview in view and B had the view with no hooks.
+    function tryPorts(i, best, done) {
+      if (i >= PORT_SPAN) { done(best); return; }
       var base = "http://127.0.0.1:" + (PORT_BASE + i);
-      timedFetch(base + "/surface/hello", null, 800).then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (j) { if (j && j.awaitful) done(base); else tryPorts(i + 1, done); })
-        .catch(function () { tryPorts(i + 1, done); });
+      timedFetch(base + "/surface/hello?shim=" + SHIM_ID + "&v=" + SHIM_V, null, 800)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (j && j.awaitful) {
+            if (j.serving) { done({ o: base, id: j.hostId }); return; }   // driven: take it now
+            if (!best) best = { o: base, id: j.hostId };                  // remember the first idle one
+          }
+          tryPorts(i + 1, best, done);
+        })
+        .catch(function () { tryPorts(i + 1, best, done); });
     }
-    function host(cb) { if (origin) { cb(origin); return; } tryPorts(0, function (o) { origin = o; cb(o); }); }
+    function host(cb) {
+      if (origin) { cb(origin); return; }
+      // An ORPHANED shim (our extension uninstalled) would otherwise rescan 12 ports every call,
+      // forever. Cache the miss.
+      if (Date.now() < noHostUntil) { cb(null); return; }
+      tryPorts(0, null, function (h) {
+        if (!h) { noHostUntil = Date.now() + 60000; cb(null); return; }
+        origin = h.o; hostId = h.id; cb(origin);
+      });
+    }
     // POST a beacon to the host. Plain fetch, NOT sendBeacon: the loopback is a different
     // origin, so the JSON content-type needs a CORS preflight — fetch performs it and the
     // host answers OPTIONS, whereas sendBeacon reports success while silently dropping the
@@ -256,7 +237,12 @@ const THINKING_SHIM = String.raw`
       host(function (o) {
         if (!o) return;
         try {
-          fetch(o + path, { method: "POST", keepalive: true, headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+          // Stamp every beacon with the host it is FOR and the shim it is FROM. The host drops
+          // anything addressed to another window, and the session ignores anything from a shim
+          // other than the one that painted - together these stop two open webviews from
+          // double-counting one impression's visible time.
+          var b = body || {}; b.hostId = hostId; b.shimId = SHIM_ID; b.v = SHIM_V;
+          fetch(o + path, { method: "POST", keepalive: true, headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
         } catch (e) {}
       });
     }
@@ -668,6 +654,10 @@ const THINKING_SHIM = String.raw`
       // Hand off: hide CC's spinner ONLY now that our banner is placed (never before).
       if (c.placement === "chat-banner") setCss(hideRule() + GLOW_KF + REDUCED_MOTION);
       dbg.overlay = true;
+      // "Rendered" is reported HERE - after the overlay is genuinely placed - and nowhere else.
+      // It used to be posted by adopt() unconditionally, while show() returns above whenever the
+      // anchor is missing: a failed render still billed an impression (golden rule 3).
+      post("/surface/rendered", { adId: c.adId, slateId: c.slateId });
     }
     function hide() {
       if (overlay) { overlay.style.display = "none"; overlay.style.visibility = "hidden"; }
@@ -708,8 +698,14 @@ const THINKING_SHIM = String.raw`
     }
     function adopt(c) {
       current = c; simStart = Date.now(); lastBeacon = simStart; lastLive = simStart;
-      show(c);
-      post("/surface/rendered", { adId: c.adId, slateId: c.slateId });
+      show(c);   // posts /surface/rendered itself, only if it actually placed the overlay
+    }
+    // Tell the host we had a creative and could not place it. This is the ONLY negative signal we
+    // send, and it is a fact the shim can prove: it had an ad, the agent was thinking, and no
+    // anchor existed. Absence of a beacon is never treated as proof of anything.
+    function attest(stage, adId) {
+      if (!origin) return;   // never scan for a host just to complain
+      post("/surface/attest", { stage: stage, adId: adId });
     }
     function tick() {
       try {
@@ -741,7 +737,9 @@ const THINKING_SHIM = String.raw`
                   fetching = false;
                   if (!current) return;                                            // torn down mid-fetch
                   if (!c || !c.line) { hide(); askAt = Date.now() + 2000; return; } // host ended session => hide
-                  if (changed(c, current)) adopt(c);                               // rotated / theme change
+                  // Anchor-gate the rotation too: a placement change swaps which anchor is needed,
+                  // and adopting without one would post a "rendered" for an overlay we cannot place.
+                  if (changed(c, current) && anchorFor(c)) adopt(c);                // rotated / theme change
                 }).catch(function () { fetching = false; });
             });
           }
@@ -767,7 +765,7 @@ const THINKING_SHIM = String.raw`
               // Only adopt once the anchor is actually placeable (e.g. the spinner is on-screen
               // in line mode). Otherwise adopt->show can't place and the next tick hides again;
               // throttle instead of churning adopt/rendered at tick rate while it's out of view.
-              if (!anchorFor(c)) { askAt = Date.now() + 500; return; }
+              if (!anchorFor(c)) { askAt = Date.now() + 500; attest("no-anchor", c.adId); return; }
               adopt(c);
             }).catch(function () { fetching = false; askAt = Date.now() + 1500; });
         });
@@ -782,7 +780,11 @@ const THINKING_SHIM = String.raw`
 
 /** Inject the readable config literal into the shim (function form avoids `$` in String.replace). */
 function shimForConfig(cfg: ShimConfig): string {
-  return THINKING_SHIM.replace('/*CONFIG*/', () => JSON.stringify(cfg));
+  return THINKING_SHIM
+    .replace('/*CONFIG*/', () => JSON.stringify(cfg))
+    // The running shim reports its own version, so the host can tell "the webview is on stale bytes,
+    // reload" apart from "the current shim genuinely cannot place its overlay".
+    .replace('/*SHIMV*/', () => String(SHIM_VERSION));
 }
 
 // Detection is now build-independent (CC's own classes), so one shim serves every build.

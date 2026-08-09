@@ -19,6 +19,20 @@ export function claudeSettingsPath(): string {
 
 export type ClaudeSettings = { hooks?: unknown; statusLine?: unknown; [key: string]: unknown };
 
+/**
+ * Does the agent's settings file already exist? A *remove* must never be the write that creates
+ * ~/.claude: nothing of ours can live in a file that is not there, and writing one would leave a
+ * config directory behind for a product that is not installed. Install gates on presence; remove
+ * gates on this.
+ */
+export function claudeSettingsExists(): boolean {
+  try {
+    return fs.existsSync(claudeSettingsPath());
+  } catch {
+    return false;
+  }
+}
+
 /** Read ~/.claude/settings.json, or `{}` if missing/unparseable (never throws). */
 export async function readClaudeSettings(): Promise<ClaudeSettings> {
   try {

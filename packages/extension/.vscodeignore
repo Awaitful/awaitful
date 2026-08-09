@@ -12,6 +12,10 @@ pnpm-lock.yaml
 **/*.test.*
 **/__tests__/**
 *.vsix
+# Working drafts are never release notes. A CHANGELOG.next.md once shipped inside the VSIX with
+# unreleased copy and placeholder dates in it; the rule stays whether or not one exists today.
+CHANGELOG*.md
+!CHANGELOG.md
 # Ship only the bundle from dist/ (excludes stale tsc output like index.js/index.d.ts).
 dist/**
 !dist/extension.js

@@ -1,5 +1,7 @@
 import * as http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import type { PlacementId } from '@awaitful/shared';
+import { SHIM_VERSION } from '../patch/recipe.js';
 
 /** What the shim needs to paint the sponsored line. Host-internal (not the server contract). */
 export interface SurfaceCreative {
@@ -43,6 +45,29 @@ export interface SurfaceBeacon {
   adId: string;
   slateId: string;
   visibleMs?: number;
+  /**
+   * Which host issued the creative this beacon is about, and which shim instance is reporting.
+   *
+   * Both are required to bill honestly with more than one webview open. Every window's shim scans
+   * the same loopback port range and can reach any window's host, so without identity two shims
+   * fetch the same creative and both post `visible {visibleMs:1000}` at 1 Hz into one accumulator -
+   * and `view_threshold_met` fires at half the wall-clock time it should. Beacons for another host
+   * are dropped at the door; beacons from a shim other than the one that first painted are ignored
+   * by the session.
+   */
+  hostId?: string;
+  shimId?: string;
+}
+
+/** The shim's self-report that it could not place the overlay. See SurfaceLiveness. */
+export interface SurfaceAttestation {
+  hostId: string;
+  shimId: string;
+  /** Shim version running in the webview, so a stale bundle is distinguishable from a broken one. */
+  v: number;
+  /** One stage today: the shim had a creative, the agent was thinking, and no anchor could be found. */
+  stage: 'no-anchor';
+  adId: string;
 }
 
 type Callbacks = {
@@ -65,6 +90,10 @@ type Callbacks = {
   getTerminalLine(): string | null;
   /** A verified render tick: an agent actually re-ran its status line while eligible (bills time). */
   onTerminalTick(): void;
+  /** A shim introduced itself to THIS host (it may still never paint). */
+  onShimHello(shimId: string, shimVersion: number): void;
+  /** A shim reported it could not place the overlay. The only proof of a non-render we accept. */
+  onAttest(a: SurfaceAttestation): void;
 };
 
 // The shim discovers the host by scanning this fixed 127.0.0.1 range (it cannot
@@ -75,9 +104,29 @@ const PORT_SPAN = 12;
 export class HookServer {
   private readonly server: http.Server;
   private _port = 0;
+  /**
+   * Identity for THIS window's host, minted per session. Every shim in every window scans the same
+   * port range, so "a beacon arrived" says nothing about which window it came from. This is what
+   * makes a beacon attributable.
+   */
+  private readonly hostId = randomUUID();
+  /**
+   * Latched once a thinking hook fires here. A shim prefers a host that is actually being driven,
+   * which is what stops window B's shim from binding to window A's host and leaving both dark.
+   */
+  private serving = false;
 
   constructor(private readonly cb: Callbacks) {
     this.server = http.createServer((req, res) => this.handle(req, res));
+  }
+
+  /** Called by the orchestrator on the first thinking hook of the session. */
+  markServing(): void {
+    this.serving = true;
+  }
+
+  get id(): string {
+    return this.hostId;
   }
 
   private cors(res: http.ServerResponse): void {
@@ -109,13 +158,24 @@ export class HookServer {
     if (method === 'POST' && url === '/thinking/resume') { res.writeHead(200).end('ok'); this.cb.onResume(); return; }
 
     // Surface channel (fired by the in-webview shim).
-    if (method === 'GET' && url === '/surface/hello') {
-      res.writeHead(200, { 'content-type': 'application/json' }).end('{"awaitful":true}');
+    if (method === 'GET' && url.startsWith('/surface/hello')) {
+      // `serving` lets a shim prefer a host that is actually being driven. With several windows
+      // open, binding to the first responder means window B's shim can latch window A's host: A
+      // gets the thinking hooks but has no shim in view, B has the view but no hooks, and nothing
+      // renders in either. Identity here is what makes every later beacon attributable.
+      const q = url.indexOf('?') >= 0 ? new URLSearchParams(url.slice(url.indexOf('?') + 1)) : undefined;
+      const shimId = q?.get('shim') ?? undefined;
+      const v = Number(q?.get('v') ?? '0');
+      if (shimId) this.cb.onShimHello(shimId, Number.isFinite(v) ? v : 0);
+      res.writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ awaitful: true, hostId: this.hostId, serving: this.serving, shimVersion: SHIM_VERSION }));
       return;
     }
     if (method === 'GET' && url === '/surface/creative') {
       const c = this.cb.getCreative();
-      res.writeHead(c ? 200 : 204, { 'content-type': 'application/json' }).end(c ? JSON.stringify(c) : '');
+      // Stamp the creative with our identity so the shim can echo it back on every beacon.
+      res.writeHead(c ? 200 : 204, { 'content-type': 'application/json' })
+        .end(c ? JSON.stringify({ ...c, hostId: this.hostId }) : '');
       return;
     }
     // Terminal status line: fired by an agent's statusLine script (see hooks/statusLineScript.ts).
@@ -131,8 +191,18 @@ export class HookServer {
         // Dispatch (cheap, synchronous) then ack. Beacons are fire-and-forget for
         // the shim, so this ordering costs nothing and keeps behaviour deterministic.
         try {
-          const b = body as SurfaceBeacon;
-          if (b && b.adId && b.slateId) {
+          const b = body as SurfaceBeacon & Partial<SurfaceAttestation>;
+          // A beacon naming a DIFFERENT host is another window's business. Dropping it here is the
+          // single point that stops cross-window double-accrual; a beacon with no hostId at all is
+          // a pre-identity shim (mid-upgrade, before the reload) and is also not ours to bill.
+          if (b && b.hostId !== this.hostId) { res.writeHead(200).end('ok'); return; }
+          // Attestation carries an adId but is not a billing beacon, so it is dispatched above the
+          // adId/slateId gate that guards the ones that are.
+          if (url === '/surface/attest') {
+            if (b && b.shimId && b.stage === 'no-anchor' && b.adId) {
+              this.cb.onAttest({ hostId: this.hostId, shimId: b.shimId, v: Number(b.v) || 0, stage: 'no-anchor', adId: b.adId });
+            }
+          } else if (b && b.adId && b.slateId) {
             if (url === '/surface/rendered') this.cb.onRendered(b);
             else if (url === '/surface/visible') this.cb.onVisible(b);
             else if (url === '/surface/click') this.cb.onClick(b);

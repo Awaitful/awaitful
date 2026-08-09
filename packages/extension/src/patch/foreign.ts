@@ -1,11 +1,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { extensionsRoot } from './targets.js';
 
 /**
- * Detect whether Claude Code has been modified by another extension, and best-effort
- * NAME the responsible extension — a vague "another extension" reads as a false
- * positive; a named one is actionable ("Acme is modifying Claude Code").
+ * Detect whether Claude Code has been modified by another extension, and NAME the responsible
+ * extension when — and only when — it is actually installed here. A vague "another extension"
+ * reads as a false positive; a named one is actionable ("Acme is modifying Claude Code"). But a
+ * name we cannot verify is worse than either, because it sends the user looking for something
+ * that may not exist.
  *
  * We hardcode no tool names. Attribution is generic, from two fingerprints another
  * extension leaves behind:
@@ -14,15 +15,80 @@ import { extensionsRoot } from './targets.js';
  *      direct signal, and present even when the tool kept its backup elsewhere; and
  *   2. a sibling backup of the original it saved next to the target
  *      ("index.js.NAME-backup"), which also doubles as a verified-pristine source.
+ *
+ * Those two say different things and must not be conflated: only the in-file marker proves the
+ * live file is modified NOW. A leftover backup proves only that a tool once ran here — the file
+ * beside it may be perfectly pristine.
+ *
  * The safety decision (patch or not) is still made purely by hash elsewhere; this
- * module only supplies presence + a human name + an optional pristine source.
+ * module only supplies presence + an optional verified name + an optional pristine source.
  */
+
+/**
+ * Whether the named tool is actually installed here. Drives copy and actions: offering
+ * "Turn off Acme" for something the user uninstalled months ago sends them hunting for a thing
+ * that does not exist, and naming a vendor we cannot find asserts more than we know.
+ *
+ *  - `yes`      an ACTIVE extension matches the token; `vendor` is its real display name.
+ *  - `disabled` it is installed but switched off. A distinct state, not a variant of `no`: turning
+ *               a tool off does not undo the change it already made, so the file is still contested
+ *               and the developer still has something to act on. VS Code's extension API lists only
+ *               ENABLED extensions, so without a disk check this looked identical to `no` - and the
+ *               panel fell back to quoting a raw marker token at someone whose tool was right there.
+ *  - `removing`  uninstalled HERE, but still loaded and still running until the window reloads. An
+ *               editor drops the registry entry at once and keeps the code alive until it restarts,
+ *               so this is the gap between clicking Remove and that click taking effect. It has to
+ *               be its own state: reading it as `yes` made the Remove button look like it had done
+ *               nothing, and reading it as `no` would claim a reload that has not happened.
+ *  - `elsewhere` installed for a DIFFERENT editor on this machine. Not a variant of `no` and not a
+ *               variant of `yes`: it is genuinely absent from this window's list, so every button we
+ *               have here is useless against it, yet it is running and re-applying its change. The
+ *               only fix is in the other application, so the copy has to say which one.
+ *  - `no`       nothing on disk matched. Say "another tool", and quote the raw marker token as a
+ *               fact ("The change is marked VIBE-ADS."). Also means the remove step is already done.
+ *  - `unknown`  we could not look (no lookup injected). Never suppress remedies on this.
+ */
+export type VendorInstalled = 'yes' | 'disabled' | 'removing' | 'no' | 'elsewhere' | 'unknown';
+
+/**
+ * Resolve a marker/backup token to an installed extension. Injected so this module needs no `vscode`.
+ * `active` separates "running" from "installed but switched off" - see VendorInstalled.
+ * `host` marks a hit that belongs to another editor entirely, which no button here can act on.
+ */
+export interface VendorHost {
+  /** The editor's familiar name, e.g. "VSCodium" - never the dot directory it lives in. */
+  label: string;
+  /** Its extensions directory. */
+  dir: string;
+  /** That extension's own folder: what to reveal, and what to delete by hand. */
+  extensionDir?: string;
+  /** Uninstalled there but not yet swept, so that editor has not restarted and still runs it. */
+  pendingRemoval?: boolean;
+}
+
+export type InstalledLookup = (token: string) =>
+  | { id: string; label: string; active: boolean; host?: VendorHost; pendingRemoval?: boolean }
+  | undefined;
 
 export interface ForeignDetection {
   /** Another extension's fingerprint was found (in-file marker or sibling backup). */
   present: boolean;
-  /** Display name of the responsible extension, when it can be resolved. */
+  /**
+   * Another tool's marker is in the LIVE bytes. This - not `present` - is proof the file is
+   * modified right now. `present` is also true for a bare leftover sibling backup, which proves
+   * only that a tool once ran here.
+   */
+  inFile?: boolean;
+  /** The raw marker/backup token as found on disk, e.g. "VIBE-ADS". Never a claim about a vendor. */
+  token?: string;
+  /** Display name of the responsible extension, only when it is actually installed. */
   vendor?: string;
+  /** Its extension id (publisher.name), so the panel can open THAT extension's page rather than
+   *  leaving the developer to find it in a search result. Set only alongside `vendor`. */
+  vendorId?: string;
+  vendorInstalled?: VendorInstalled;
+  /** Which other editor holds it, and where. Set only alongside `vendorInstalled: 'elsewhere'`. */
+  vendorHost?: VendorHost;
   /** Path to the sibling backup, if any (a verified-pristine source for take-over). */
   backupPath?: string;
 }
@@ -44,23 +110,87 @@ const OUR_MARKER_TOKEN = 'awaitful';
  * usually already read it) to enable the strongest signal — the in-file patch marker;
  * without it, only the sibling-backup scan runs. Never throws.
  */
-export function detectForeign(targetFile: string, content?: string): ForeignDetection {
+export function detectForeign(
+  targetFile: string,
+  content?: string,
+  lookup?: InstalledLookup,
+): ForeignDetection {
   const markerToken = content ? foreignMarkerToken(content) : undefined;
   const sibling = siblingBackup(targetFile);
 
   if (!sibling.present && !markerToken) return { present: false };
 
-  // Resolve a real name: the backup token first (it may be an old product name a manifest
-  // scan can map), then the in-file marker. Either resolves through installed extensions.
-  const vendor = sibling.vendor ?? (markerToken ? resolveVendorName(markerToken) : undefined);
+  // The in-file marker is the stronger signal (it describes the bytes we are looking at), so it
+  // names the token; the backup token is the fallback and may be an older product name.
+  const token = markerToken ?? sibling.token;
   const out: ForeignDetection = { present: true };
-  if (vendor) out.vendor = vendor;
+  if (markerToken !== undefined) out.inFile = true;
+  if (token) out.token = token;
   if (sibling.backupPath) out.backupPath = sibling.backupPath;
+
+  if (!token) {
+    out.vendorInstalled = 'unknown';
+    return out;
+  }
+  if (!lookup) {
+    // No way to check the installed set: name nothing, and never suppress a remedy on this.
+    out.vendorInstalled = 'unknown';
+    return out;
+  }
+  // Try the in-file token and the backup token independently - a tool may mark files with one
+  // name and save backups under another.
+  const hit = lookup(token) ?? (sibling.token && sibling.token !== token ? lookup(sibling.token) : undefined);
+  if (hit) {
+    out.vendor = hit.label;
+    out.vendorId = hit.id;
+    // A hit in another editor is never 'disabled': it is not switched off, it is running somewhere
+    // this window has no reach into, which is a different problem with a different remedy.
+    out.vendorInstalled = hit.host
+      ? 'elsewhere'
+      : hit.pendingRemoval
+        // Uninstalled here and still running: neither gone nor installed, and the difference is the
+        // reload the developer has not done yet.
+        ? 'removing'
+        : hit.active ? 'yes' : 'disabled';
+    if (hit.host) out.vendorHost = hit.host;
+  } else {
+    out.vendorInstalled = 'no';
+  }
   return out;
 }
 
-/** First foreign patch marker's NAME token found in the file, excluding our own. */
-function foreignMarkerToken(content: string): string | undefined {
+/**
+ * Build an InstalledLookup over a snapshot of installed extensions. The orchestrator passes
+ * `vscode.extensions.all`; tests pass a literal. Matches on extension id and display name, so a
+ * marker token like "vibe-ads" finds "publisher.vibe-ads" or a "Vibe Ads" display name.
+ */
+export function installedLookup(
+  installed: readonly {
+    id: string; label: string; active: boolean; host?: VendorHost; pendingRemoval?: boolean;
+  }[],
+): InstalledLookup {
+  return (token: string) => {
+    if (token.length < 3) return undefined; // too short/generic to attribute
+    const needle = token.toLowerCase().replace(/[-_]/g, '');
+    const norm = (s: string) => s.toLowerCase().replace(/[-_\s.]/g, '');
+    for (const ext of installed) {
+      const id = ext.id.toLowerCase();
+      if (id.startsWith('anthropic.claude-code') || id.startsWith('awaitful')) continue;
+      if (norm(ext.id).includes(needle) || norm(ext.label).includes(needle)) return ext;
+    }
+    return undefined;
+  };
+}
+
+/**
+ * First foreign patch marker's NAME token found in the file, excluding our own.
+ *
+ * Exported because it is also the contamination check: any content we are about to treat as
+ * PRISTINE must contain none of these. Deriving a "pristine" that still carries another tool's
+ * block is how a competitor's code gets hashed as the original and written back as ours - the
+ * defect that poisoned 49 stored backups in the field.
+ */
+export function foreignMarkerToken(content: string): string | undefined {
   FOREIGN_MARKER.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = FOREIGN_MARKER.exec(content)) !== null) {
@@ -90,71 +220,9 @@ function siblingBackup(targetFile: string): ForeignDetection {
     if (!BACKUP_WORDS.test(suffix)) continue;            // must look like a backup
 
     const token = suffix.replace(/^[.\-_]/, '').replace(BACKUP_WORDS, '').trim();
-    const vendor = resolveVendorName(token);
     const backupPath = path.join(dir, name);
-    return vendor
-      ? { present: true, vendor, backupPath }
-      : { present: true, backupPath };
+    return token ? { present: true, token, backupPath } : { present: true, backupPath };
   }
 
   return { present: false };
-}
-
-/**
- * Resolve a backup-filename token (e.g. "acme") to an installed extension's
- * display name by scanning the user's own extensions directory — so the name we
- * show is real and current, never hardcoded. Returns undefined if the token is
- * empty/generic or no installed extension matches.
- */
-function resolveVendorName(token: string): string | undefined {
-  if (token.length < 3) return undefined; // too short/generic to trust
-
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(extensionsRoot());
-  } catch {
-    return titleCase(token);
-  }
-
-  const needle = token.toLowerCase();
-  const candidates = dirs.filter((d) => {
-    const low = d.toLowerCase();
-    return !low.startsWith('anthropic.claude-code-') && !low.startsWith('awaitful');
-  });
-
-  const displayName = (d: string): string | undefined => {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(extensionsRoot(), d, 'package.json'), 'utf8'));
-      const name = pkg.displayName || pkg.name;
-      return typeof name === 'string' && name.trim() ? name.trim() : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-
-  // 1. Match by directory name (publisher.name-version) — fast and precise.
-  for (const d of candidates) {
-    if (d.toLowerCase().includes(needle)) return displayName(d) ?? titleCase(token);
-  }
-
-  // 2. Match by manifest CONTENT — catches a backup suffix that is an old product
-  //    name (e.g. ".acme-classic-backup" left by an extension since renamed to "Acme",
-  //    whose package.json still mentions "acme-classic"). Still fully generic.
-  for (const d of candidates) {
-    try {
-      const raw = fs.readFileSync(path.join(extensionsRoot(), d, 'package.json'), 'utf8');
-      if (raw.toLowerCase().includes(needle)) {
-        const name = displayName(d);
-        if (name) return name;
-      }
-    } catch {
-      /* ignore and keep scanning */
-    }
-  }
-
-  return titleCase(token);
-}
-
-function titleCase(s: string): string {
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
