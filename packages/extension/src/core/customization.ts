@@ -1,4 +1,6 @@
-import * as vscode from 'vscode';
+// Type-only: with the legacy VS Code settings gone this file touches no VS Code API at all, just a
+// Memento it is handed. That is the shape it should have had - storage logic, nothing environmental.
+import type * as vscode from 'vscode';
 import {
   formatSettings, formatElements, settingKey, adFormat, ELEMENTS,
   type AdFormatId, type ElementId, type ElementValue, type ResolvedElement,
@@ -6,10 +8,6 @@ import {
 
 /** One object holding every per-format choice, rather than a settings entry per pair. */
 const STORE_KEY = 'awaitful.customize';
-
-/** Pre-per-format storage, read once to seed and never written again. */
-const LEGACY_BANNER_STYLE_KEY = 'awaitful.chatBannerStyle';
-const LEGACY_BANNER_FRAME_KEY = 'awaitful.chatBannerFrame';
 
 /**
  * What each ad format looks like on THIS machine.
@@ -30,40 +28,14 @@ export class Customization {
     return this.state.get<Record<string, unknown>>(STORE_KEY) ?? {};
   }
 
-  /**
-   * Where a value came from before customization was per-format: two VS Code settings and two
-   * globalState keys. Handed to the shared resolver under the OLD key names, which knows how to
-   * seed each format from them - so an existing machine keeps its look with no migration step and
-   * no second copy of that logic here.
-   */
-  private legacy(): Record<string, unknown> {
-    const cfg = vscode.workspace.getConfiguration('awaitful');
-    const out: Record<string, unknown> = {};
-    const spinner = cfg.get<string>('adSpinner');
-    const brandLogo = cfg.get<boolean>('adBrandLogo');
-    const style = this.state.get<string>(LEGACY_BANNER_STYLE_KEY);
-    const frame = this.state.get<string>(LEGACY_BANNER_FRAME_KEY);
-    if (spinner !== undefined) out['spinner'] = spinner;
-    if (brandLogo !== undefined) out['brandLogo'] = brandLogo;
-    if (style !== undefined) out['chatBannerStyle'] = style;
-    if (frame !== undefined) out['chatBannerFrame'] = frame;
-    return out;
-  }
-
-  /** Every choice in force here: per-format keys sit ON TOP of the legacy seed, so an explicit
-   *  choice always wins. */
-  private all(): Record<string, unknown> {
-    return { ...this.legacy(), ...this.stored() };
-  }
-
   /** Resolved values for one format: what this machine has chosen, else the element's default. */
   for(format: AdFormatId): Record<ElementId, ElementValue> {
-    return formatSettings(this.all(), format);
+    return formatSettings(this.stored(), format);
   }
 
   /** What the panel draws for one format: each element, its options, and the value in force here. */
   elements(format: AdFormatId): ResolvedElement[] {
-    return formatElements(this.all(), format);
+    return formatElements(this.stored(), format);
   }
 
   /**

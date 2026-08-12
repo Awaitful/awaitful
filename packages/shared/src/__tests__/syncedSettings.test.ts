@@ -84,36 +84,33 @@ describe('per-format independence', () => {
   });
 });
 
-describe('legacy account-wide keys', () => {
-  // Accounts written before customization was per-format keep their choices with no data
-  // migration: the old key seeds every format that draws that element.
-  const legacy = { spinner: 'dots', brandLogo: false, chatBannerStyle: 'ember', chatBannerFrame: 'full' };
+describe('the retired account-wide keys are inert', () => {
+  // Before customization was per-format, four account-wide keys seeded every format that drew that
+  // element. Supporting them meant two key shapes alive at once - in storage, in this resolver, and
+  // in the head of anyone reasoning about what a change would do. They are no longer read.
+  //
+  // Rows written back then may still carry them, so this pins that they are IGNORED rather than
+  // honoured: the same treatment any unrecognised key gets, which is what makes them harmless to
+  // leave in the database instead of requiring a migration to delete.
+  const retired = { spinner: 'dots', brandLogo: false, chatBannerStyle: 'ember', chatBannerFrame: 'full' };
 
-  it('an old account-wide spinner seeds every format', () => {
-    for (const f of AD_FORMATS) expect(formatSettings(legacy, f.id).spinner).toBe('dots');
+  it('an old account-wide value does not seed any format', () => {
+    for (const f of AD_FORMATS) {
+      expect(formatSettings(retired, f.id).spinner).toBe(ELEMENTS.spinner.defaultValue);
+    }
+    expect(formatSettings(retired, 'chat-banner').glow).toBe(ELEMENTS.glow.defaultValue);
+    expect(formatSettings(retired, 'thinking-line').logo).toBe(ELEMENTS.logo.defaultValue);
   });
 
-  it('an old logo choice reaches only the formats that draw one', () => {
-    expect(formatSettings(legacy, 'thinking-line').logo).toBe(false);
-    expect(formatSettings(legacy, 'chat-banner').logo).toBe(false);
-    expect(formatSettings(legacy, 'status-bar')).not.toHaveProperty('logo');
+  it('an old value is never counted as a choice, so the UI still calls it a default', () => {
+    expect(isChosen(retired, 'terminal', 'spinner')).toBe(false);
+    expect(isChosen(retired, 'chat-banner', 'glow')).toBe(false);
   });
 
-  it('old chat-banner keys never leak to another format', () => {
-    // These were always chat-banner only; fanning them out would invent a choice nobody made.
-    expect(formatSettings(legacy, 'chat-banner').glow).toBe('ember');
-    expect(formatSettings(legacy, 'thinking-line')).not.toHaveProperty('glow');
-  });
-
-  it('a per-format value wins over a legacy one', () => {
-    const mixed = { ...legacy, 'chat-banner.spinner': 'pulse' };
+  it('a per-format value alongside an old one is still honoured', () => {
+    const mixed = { ...retired, 'chat-banner.spinner': 'pulse' };
     expect(formatSettings(mixed, 'chat-banner').spinner).toBe('pulse');
-    expect(formatSettings(mixed, 'thinking-line').spinner).toBe('dots'); // still the legacy value
-  });
-
-  it('counts a legacy value as chosen, so the UI does not call it a default', () => {
-    expect(isChosen(legacy, 'terminal', 'spinner')).toBe(true);
-    expect(isChosen(null, 'terminal', 'spinner')).toBe(false);
+    expect(isChosen(mixed, 'chat-banner', 'spinner')).toBe(true);
   });
 });
 

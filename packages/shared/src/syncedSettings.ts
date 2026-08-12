@@ -155,30 +155,18 @@ export function settingKey(format: AdFormatId, element: ElementId): string {
 }
 
 /**
- * Legacy account-wide keys, from before customization was per-format. Read-only compatibility: a
- * stored legacy value seeds every format that draws that element, so an account keeps its choices
- * without a data migration and without the client needing to know which shape it is reading.
- * Nothing writes these any more.
- */
-const LEGACY_KEYS: Record<string, ElementId> = {
-  spinner: 'spinner',
-  brandLogo: 'logo',
-  chatBannerStyle: 'glow',
-  chatBannerFrame: 'frame',
-};
-
-/** Legacy keys that only ever applied to one format, so they must not fan out to the others. */
-const LEGACY_FORMAT_SCOPE: Record<string, AdFormatId | undefined> = {
-  chatBannerStyle: 'chat-banner',
-  chatBannerFrame: 'chat-banner',
-};
-
-/**
  * Resolve what a format should draw: the value the account chose, or the element's default.
+ *
+ * `${format}.${element}` is the ONLY shape read. An earlier build also honoured four account-wide
+ * keys (`spinner`, `brandLogo`, `chatBannerStyle`, `chatBannerFrame`) left over from before
+ * customization was per-format, seeding every format that drew that element. That path is gone: it
+ * made "what will changing this do" depend on which formats happened to have an explicit choice,
+ * and it kept a second key shape alive in storage, in the resolver, and in every reader's head.
  *
  * Never throws and never returns something this build cannot render. An unknown key (a newer server
  * talking to an older client) and a value that has since left an option list are both skipped, so a
- * settings rollout can never brick an editor that has not updated yet.
+ * settings rollout can never brick an editor that has not updated yet - and an unrecognised legacy
+ * key is now simply one more unknown key, ignored by that same rule rather than by its own.
  */
 export function formatSettings(
   prefs: Record<string, unknown> | null | undefined,
@@ -192,16 +180,6 @@ export function formatSettings(
     const element = ELEMENTS[elementId];
     out[elementId] = element.defaultValue;
     if (!prefs) continue;
-
-    // Legacy account-wide value seeds this format, unless it was scoped to a different one.
-    for (const [legacyKey, mapped] of Object.entries(LEGACY_KEYS)) {
-      if (mapped !== elementId) continue;
-      const scope = LEGACY_FORMAT_SCOPE[legacyKey];
-      if (scope && scope !== format) continue;
-      const v = prefs[legacyKey];
-      if (v !== undefined && element.isValid(v)) out[elementId] = v;
-    }
-    // A per-format value always wins over a legacy one.
     const v = prefs[settingKey(format, elementId)];
     if (v !== undefined && element.isValid(v)) out[elementId] = v;
   }
@@ -216,15 +194,7 @@ export function isChosen(
 ): boolean {
   if (!prefs) return false;
   const own = prefs[settingKey(format, element)];
-  if (own !== undefined && ELEMENTS[element].isValid(own)) return true;
-  for (const [legacyKey, mapped] of Object.entries(LEGACY_KEYS)) {
-    if (mapped !== element) continue;
-    const scope = LEGACY_FORMAT_SCOPE[legacyKey];
-    if (scope && scope !== format) continue;
-    const v = prefs[legacyKey];
-    if (v !== undefined && ELEMENTS[element].isValid(v)) return true;
-  }
-  return false;
+  return own !== undefined && ELEMENTS[element].isValid(own);
 }
 
 /**

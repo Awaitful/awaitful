@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
-import type { ResolvedElement } from '@awaitful/shared';
+import { type ResolvedElement } from '@awaitful/shared';
+// Its own subpath, not the barrel - see the note in shared/src/index.ts.
+import { WIREFRAME_SVG } from '@awaitful/shared/wireframe';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -138,8 +140,8 @@ export interface PanelState {
    * knows nothing about what a "spinner" or a "glow" is, so adding an element to the shared
    * catalogue gives every format that declares it a working control with no change here.
    *
-   * Replaced the account-wide `adSpinner` / `adBrandLogo` / `chatBanner*` fields: those said one
-   * spinner for four formats, which was never what the panel was actually storing.
+   * Replaced the account-wide fields this panel once carried, which said one spinner for four
+   * formats - never what it was actually storing. Those settings are gone entirely as of 0.7.5.
    */
   customize: Record<string, ResolvedElement[]>;
   /** The shared glow @keyframes/@property, injected once so a swatch preview animates for real. */
@@ -152,6 +154,20 @@ export interface PanelState {
    *  only reason it can be blocked. */
   terminalBlockedReason?: 'no-agent-cli' | undefined;
   terminalEarnRate: number | undefined;
+  /** Device-local: the onboarding stepper was dismissed with its ✕. Persisted, so it never returns on
+   *  this machine - the format cards and the sync toggle stay the way to change things afterwards. */
+  onboardingDismissed: boolean;
+  /** The one format the stepper's "turn on a format" step offers - pickBestUpgrade's result (chat
+   *  banner normally; the best available on a capability-limited machine). undefined when there is
+   *  nothing better than the status bar to turn on here. */
+  bestUpgrade: string | undefined;
+  /** The extension version changed since this machine last saw the panel - show the one-time "what's
+   *  new" banner. False on a fresh install (nothing to be new about) and after it is acknowledged. */
+  justUpdated: boolean;
+  /** The account's web-set format preference (from /v1/me). A non-null value - including "status-bar" -
+   *  is a deliberate dashboard choice, so the stepper's format step counts as settled and never pushes a
+   *  different format against it. */
+  remoteSurfacePref: string | null;
 }
 
 export type PanelMessage =
@@ -187,6 +203,13 @@ export type PanelMessage =
   | { type: 'toggle-enabled' }
   | { type: 'toggle-statusbar-earnings' }
   | { type: 'toggle-remote-control' }
+  /** Dismiss the onboarding stepper (its ✕). Available only once signed in - the signed-out stepper
+   *  IS the sign-in surface, so there is nothing to dismiss to. Persisted device-local by the host. */
+  | { type: 'dismiss-onboarding' }
+  /** Open the release notes AND mark this version seen, from the post-update banner's "See what's new". */
+  | { type: 'whats-new' }
+  /** Mark this version seen without opening anything, from the post-update banner's ✕. */
+  | { type: 'dismiss-whats-new' }
   | { type: 'visit-ad' };
 
 // ── Panel singleton ───────────────────────────────────────────────────────────
@@ -416,15 +439,60 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .signin h3{font-size:15px;font-weight:600;margin-bottom:4px;text-wrap:balance}
 .signin p{font-size:12px;color:var(--text-2);margin-bottom:16px;line-height:1.5}
 
+/* ── What's-new banner (post-update, one-time) ── */
+.whatsnew{display:flex;align-items:center;gap:8px;background:var(--active-bg);border:1px solid var(--active-border);border-radius:9px;padding:8px 10px;margin-bottom:16px}
+.whatsnew-spark{color:var(--brand-dark);font-size:12px;flex-shrink:0}
+.whatsnew-text{font-size:12px;font-weight:600;color:var(--text);flex-shrink:0}
+.whatsnew-cta{font-size:11.5px;font-weight:600;color:var(--brand-dark);background:none;border:none;padding:2px 4px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.whatsnew-cta:hover{opacity:.8}
+.whatsnew-cta:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px;border-radius:4px}
+.whatsnew-x{margin-left:auto;flex-shrink:0;width:22px;height:22px;display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:6px;color:var(--text-3);font-size:15px;line-height:1;cursor:pointer;transition:color .12s,background .12s}
+.whatsnew-x:hover{color:var(--text);background:var(--surface-2)}
+.whatsnew-x:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px}
+
+/* ── Onboarding stepper ── */
+/* A vertical 3-step guide pinned to the top: sign in, turn on a format, sync. Every step's done/current
+   state is DERIVED from panel state (no stored step flags); only the ✕-dismissal is persisted. */
+.stepper{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 16px 10px;margin-bottom:20px}
+.stepper-title{font-size:13px;font-weight:600;color:var(--text)}
+.stepper-sub{font-size:11px;color:var(--text-3);margin:2px 0 15px}
+.stepper-x{position:absolute;top:9px;right:9px;width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:6px;color:var(--text-3);font-size:16px;line-height:1;cursor:pointer;transition:color .12s,background .12s}
+.stepper-x:hover{color:var(--text);background:var(--surface-2)}
+.stepper-x:focus-visible{outline:2px solid var(--brand-dark);outline-offset:1px}
+.step{display:flex;gap:12px;position:relative;padding-bottom:16px}
+.step:last-child{padding-bottom:6px}
+.step-rail{position:relative;flex-shrink:0;width:22px;display:flex;justify-content:center}
+.step:not(:last-child) .step-rail::after{content:'';position:absolute;top:24px;bottom:-14px;left:50%;transform:translateX(-50%);width:1.5px;background:var(--border)}
+.step.done .step-rail::after{background:var(--active-border)}
+.step-num{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;z-index:1;border:1.5px solid var(--border-strong);color:var(--text-3);background:var(--bg)}
+.step.current .step-num{border-color:var(--active-border);color:var(--cta);background:var(--active-bg)}
+.step.done .step-num{border-color:var(--active-border);background:var(--active-border);color:var(--cta-text)}
+.step-main{flex:1;min-width:0}
+.step-title{font-size:12.5px;font-weight:600;color:var(--text)}
+.step.todo .step-title,.step.blocked .step-title{color:var(--text-3);font-weight:500}
+.step-sub{font-size:11px;color:var(--text-3);line-height:1.45;margin-top:1px}
+.step-act{margin-top:9px}
+.step-blocked-note{font-size:10.5px;color:var(--text-3);line-height:1.4;margin-top:5px}
+
 /* ── Interactive illustration ── */
 .illus-wrap{
   background:var(--surface);border:1px solid var(--border);
   border-radius:10px;overflow:hidden;margin-bottom:16px;
   aspect-ratio:16/9;position:relative;
+  /* The artwork is theme-agnostic; these three say what OUR green is here. --brand is the same
+     value in all three theme blocks, so the picture is pixel-identical to before the move. */
+  --awf-hl:var(--brand);--awf-hl-ink:oklch(10% 0.004 135);--awf-hl-glyph:#fff;
 }
 .illus-wrap svg{width:100%;height:100%;display:block}
-.hl{opacity:0;transition:opacity 180ms ease}
-.hl.on{opacity:1}
+/* Which region is lit is an ATTRIBUTE on the wrapper, not a class toggled per element. The wrapper
+   can therefore be coloured and aimed before it is ever in the document, which is what removes the
+   old bug: the list page called updateHighlight() while the svg was still detached, getElementById
+   returned null, and the default highlight silently never applied until the first hover-out. */
+.illus-wrap [data-region]{opacity:0;transition:opacity 180ms ease}
+.illus-wrap[data-active='status-bar'] [data-region='status-bar'],
+.illus-wrap[data-active='thinking-line'] [data-region='thinking-line'],
+.illus-wrap[data-active='chat-banner'] [data-region='chat-banner'],
+.illus-wrap[data-active='terminal'] [data-region='terminal']{opacity:1}
 
 /* ── Privacy strip ── */
 /* The strongest thing this product can say about itself, so it is given room to say it: the mark
@@ -647,7 +715,6 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .manual-box .num.open{border-color:var(--border-strong);color:var(--text-3)}
 .manual-box .conflict-step::before{display:none}
 .manual-box .lbl{color:var(--text-3)}
-@media (prefers-reduced-motion:reduce){.conflict-step .num{transition:none}}
 .conflict-step .lbl{flex:1;font-size:12px;color:var(--text-2);line-height:1.4}
 .conflict-act{flex-shrink:0;font-size:11.5px;font-weight:600;color:var(--brand-dark);background:none;border:1px solid var(--border-strong);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;transition:background 100ms}
 .conflict-act:hover{background:var(--surface-2)}
@@ -697,7 +764,6 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
    the editor. Negative margin cancels the flex gap, or the line would keep a phantom logo's width. */
 .ad-eg.off .ad-eg-logo{opacity:0;width:0;margin-right:-8px}
 .ad-eg-text{color:var(--text);text-decoration:underline;overflow:hidden;text-overflow:ellipsis;min-width:0}
-@media (prefers-reduced-motion:reduce){.ad-eg-logo{transition:none}}
 /* Inside the chat banner's mock the same line has no box of its own - the banner IS the box, and one
    preview per page is the rule. Every format previews the ad line; only this one wraps it in chrome. */
 .bp-face .ad-eg{background:none;border:0;padding:0;margin:0;flex:1;min-width:0}
@@ -710,7 +776,6 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .spin-tile.on{border-color:var(--active-border);background:var(--active-bg)}
 .spin-glyph{font-family:var(--vscode-editor-font-family,ui-monospace,'SF Mono',monospace);font-size:20px;color:var(--text)}
 .spin-tile.none .spin-glyph{opacity:.4;font-size:11px}
-@media (prefers-reduced-motion:reduce){.bp-glow{animation:none!important}}
 .gh-btn{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--brand-dark);background:none;border:1px solid var(--border-strong);border-radius:6px;padding:8px 12px;cursor:pointer;width:100%;transition:background 100ms;margin-bottom:16px}
 .gh-btn:hover{background:var(--surface)}
 .detail-footer{display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap}
@@ -747,147 +812,27 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
    (never transition:all), and the scale is dropped under reduced-motion. ── */
 .btn-primary,.btn-visit,.gh-btn,.back,.btn-ghost,.conflict-act{transition:transform 110ms cubic-bezier(.2,0,0,1),opacity 100ms,border-color 100ms,background 100ms,color 100ms}
 .btn-primary:active,.btn-visit:active,.gh-btn:active,.back:active,.btn-ghost:active,.conflict-act:active{transform:scale(.96)}
+
+/* ── Reduced motion: one rule, not a list of exceptions ──────────────────────────
+   This replaced four per-selector opt-outs that between them covered a step number, the logo
+   collapse, the glow and the press scale - while roughly seventeen other transitions (cards,
+   toggles, chips, tiles, the highlight fade) kept animating for someone who had asked them not to.
+   A blanket rule cannot fall behind the stylesheet the way an exception list does: a transition
+   added tomorrow is covered the day it is written.
+
+   animation:none rather than a collapsed duration, because the breathing glow theme ends at
+   opacity .28 - running it once at ~0ms would freeze it dimmed, where none leaves it at its
+   initial value. The press scale needs its own line: it is an :active STATE, not a transition, so
+   removing the transition alone would still shrink the button, just instantly.
+
+   (No backticks anywhere in this comment: the whole sheet is a TypeScript template literal, so one
+   would end the string mid-stylesheet.) ── */
 @media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important}
   .btn-primary:active,.btn-visit:active,.gh-btn:active,.back:active,.btn-ghost:active,.conflict-act:active{transform:none}
 }
 `;
 
-// ── Interactive VS Code Illustration ─────────────────────────────────────────
-// Single SVG of a VS Code window; each surface has a named group (.hl) that
-// fades in on hover/active to show exactly where that surface lives.
-
-const ILLUSTRATION = `<svg viewBox="0 0 400 225" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <!-- Window chrome (short title bar) -->
-  <rect width="400" height="225" rx="6" fill="currentColor" opacity=".06"/>
-  <rect width="400" height="24" rx="6" fill="currentColor" opacity=".08"/>
-  <rect y="18" width="400" height="6" fill="currentColor" opacity=".08"/>
-  <circle cx="14" cy="11" r="3.5" fill="currentColor" opacity=".22"/>
-  <circle cx="26" cy="11" r="3.5" fill="currentColor" opacity=".22"/>
-  <circle cx="38" cy="11" r="3.5" fill="currentColor" opacity=".22"/>
-  <!-- Command bar (top center, in line with the traffic lights) -->
-  <rect x="140" y="5" width="120" height="11" rx="3" fill="currentColor" opacity=".05"/>
-  <rect x="140" y="5" width="120" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity=".12"/>
-  <rect x="154" y="9" width="92" height="3" rx="1" fill="currentColor" opacity=".14"/>
-
-  <!-- Activity bar -->
-  <rect x="0" y="24" width="24" height="186" fill="currentColor" opacity=".06"/>
-  <rect x="4" y="34" width="16" height="16" rx="3" fill="currentColor" opacity=".15"/>
-  <rect x="4" y="56" width="16" height="16" rx="3" fill="currentColor" opacity=".10"/>
-  <rect x="4" y="78" width="16" height="16" rx="3" fill="currentColor" opacity=".10"/>
-
-  <!-- Sidebar / explorer -->
-  <rect x="24" y="24" width="48" height="186" fill="currentColor" opacity=".04"/>
-  <rect x="30" y="34" width="36" height="5" rx="2" fill="currentColor" opacity=".20"/>
-  <rect x="30" y="44" width="26" height="4" rx="2" fill="currentColor" opacity=".15"/>
-  <rect x="30" y="52" width="32" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="30" y="60" width="22" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="30" y="68" width="28" height="4" rx="2" fill="currentColor" opacity=".12"/>
-
-  <!-- Editor (middle-left, code) -->
-  <rect x="72" y="24" width="144" height="150" fill="currentColor" opacity=".03"/>
-  <rect x="80" y="34" width="100" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="80" y="42" width="122" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="50" width="82" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="80" y="62" width="114" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="70" width="94" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="80" y="82" width="110" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="94" width="78" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="80" y="106" width="118" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="118" width="98" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="80" y="130" width="112" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="142" width="86" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="80" y="154" width="102" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="166" width="90" height="4" rx="2" fill="currentColor" opacity=".16"/>
-
-  <!-- Terminal (lower-middle, left of Claude Code, above the status bar) -->
-  <rect x="72" y="176" width="144" height="34" fill="currentColor" opacity=".05"/>
-  <rect x="72" y="176" width="144" height="1" fill="currentColor" opacity=".12"/>
-  <rect x="80" y="182" width="22" height="4" rx="2" fill="currentColor" opacity=".25"/>
-  <rect x="106" y="182" width="40" height="4" rx="2" fill="currentColor" opacity=".14"/>
-  <circle cx="82" cy="198" r="4" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".20" stroke-dasharray="10 6"/>
-  <rect x="92" y="194.5" width="96" height="7" rx="2" fill="currentColor" opacity=".12"/>
-
-  <!-- Claude Code panel (docked right, widest) -->
-  <rect x="218" y="24" width="182" height="186" fill="currentColor" opacity=".035"/>
-  <rect x="218" y="24" width="1" height="186" fill="currentColor" opacity=".12"/>
-  <!-- chat messages -->
-  <rect x="226" y="34" width="130" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="226" y="42" width="150" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="226" y="50" width="108" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="226" y="62" width="142" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="226" y="70" width="96" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="226" y="82" width="134" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="226" y="90" width="104" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <!-- Thinking line (just above the banner) -->
-  <circle cx="232" cy="157" r="5" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".22" stroke-dasharray="12 8"/>
-  <rect x="242" y="153" width="96" height="8" rx="3" fill="currentColor" opacity=".12"/>
-  <!-- Chat banner: same width as the chat box; rounded top, sides end where the box corner curve ends -->
-  <path d="M226 178 L226 170 Q226 165 231 165 L387 165 Q392 165 392 170 L392 178 Z" fill="currentColor" opacity=".06"/>
-  <path d="M226 184 L226 170 Q226 165 231 165 L387 165 Q392 165 392 170 L392 184" fill="none" stroke="currentColor" stroke-width="1" opacity=".14"/>
-  <rect x="232" y="169" width="70" height="4" rx="2" fill="currentColor" opacity=".16"/>
-  <rect x="368" y="169" width="20" height="4" rx="1" fill="currentColor" opacity=".16"/>
-  <!-- Chat input box (placeholder row + mic, button row below) -->
-  <rect x="226" y="178" width="166" height="30" rx="6" fill="currentColor" opacity=".03"/>
-  <rect x="226" y="178" width="166" height="30" rx="6" fill="none" stroke="currentColor" stroke-width="1" opacity=".16"/>
-  <rect x="232" y="184" width="88" height="4" rx="2" fill="currentColor" opacity=".14"/>
-  <circle cx="384" cy="186" r="2.6" fill="none" stroke="currentColor" stroke-width="1.1" opacity=".22"/>
-  <rect x="232" y="197" width="7" height="7" rx="2" fill="currentColor" opacity=".14"/>
-  <rect x="242" y="197" width="7" height="7" rx="2" fill="currentColor" opacity=".14"/>
-  <rect x="346" y="199" width="26" height="4" rx="2" fill="currentColor" opacity=".12"/>
-  <rect x="378" y="194" width="11" height="11" rx="3" fill="currentColor" opacity=".25"/>
-
-  <!-- Status bar (very bottom strip; the ad area is the wide item at the right) -->
-  <rect x="0" y="210" width="400" height="15" fill="currentColor" opacity=".08"/>
-  <rect x="6" y="214" width="30" height="7" rx="2" fill="currentColor" opacity=".14"/>
-  <rect x="42" y="214" width="22" height="7" rx="2" fill="currentColor" opacity=".10"/>
-  <rect x="304" y="214" width="88" height="7" rx="2" fill="currentColor" opacity=".13"/>
-  <circle cx="311" cy="217.5" r="2" fill="currentColor" opacity=".18"/>
-
-  <!-- ═══════════ HOTSPOT OVERLAYS (toggled by JS) ═══════════════════════════ -->
-
-  <!-- Status bar highlight (ad area = wide item on the right; label centered) -->
-  <g id="hl-status-bar" class="hl">
-    <rect x="0" y="210" width="400" height="15" fill="oklch(86% 0.171 134)" opacity=".25"/>
-    <rect x="304" y="211" width="90" height="13" rx="2" fill="oklch(86% 0.171 134)" opacity=".6"/>
-    <circle cx="311" cy="217.5" r="2.5" fill="white"/>
-    <rect x="318" y="214" width="70" height="7" rx="2" fill="white" opacity=".75"/>
-    <rect x="162" y="211" width="76" height="13" rx="2" fill="oklch(86% 0.171 134)"/>
-    <text x="200" y="220.5" text-anchor="middle" font-size="9" font-weight="600" fill="oklch(10% 0.004 135)">Status bar</text>
-    <line x1="238" y1="217.5" x2="302" y2="217.5" stroke="oklch(86% 0.171 134)" stroke-width="1" stroke-dasharray="3 2"/>
-  </g>
-
-  <!-- Thinking line highlight -->
-  <g id="hl-thinking-line" class="hl">
-    <rect x="218" y="149" width="182" height="16" rx="2" fill="oklch(86% 0.171 134)" opacity=".12"/>
-    <circle cx="232" cy="157" r="5" fill="none" stroke="oklch(86% 0.171 134)" stroke-width="1.8" stroke-dasharray="12 8"/>
-    <rect x="242" y="153" width="100" height="8" rx="3" fill="oklch(86% 0.171 134)" opacity=".65"/>
-    <rect x="108" y="149" width="100" height="16" rx="3" fill="oklch(86% 0.171 134)"/>
-    <text x="158" y="160.5" text-anchor="middle" font-size="9" font-weight="600" fill="oklch(10% 0.004 135)">Thinking line</text>
-    <line x1="208" y1="157" x2="226" y2="157" stroke="oklch(86% 0.171 134)" stroke-width="1" stroke-dasharray="3 2"/>
-  </g>
-
-  <!-- Chat banner highlight (same width; open-bottom outline; seconds bar) -->
-  <g id="hl-chat-banner" class="hl">
-    <path d="M226 178 L226 170 Q226 165 231 165 L387 165 Q392 165 392 170 L392 178 Z" fill="oklch(86% 0.171 134)" opacity=".24"/>
-    <path d="M226 184 L226 170 Q226 165 231 165 L387 165 Q392 165 392 170 L392 184" fill="none" stroke="oklch(86% 0.171 134)" stroke-width="1.2" opacity=".85"/>
-    <rect x="232" y="169" width="70" height="4" rx="2" fill="oklch(86% 0.171 134)" opacity=".9"/>
-    <rect x="368" y="169" width="20" height="4" rx="1" fill="oklch(86% 0.171 134)" opacity=".7"/>
-    <rect x="104" y="163" width="100" height="16" rx="3" fill="oklch(86% 0.171 134)"/>
-    <text x="154" y="174.5" text-anchor="middle" font-size="9" font-weight="600" fill="oklch(10% 0.004 135)">Chat banner</text>
-    <line x1="204" y1="171" x2="224" y2="172" stroke="oklch(86% 0.171 134)" stroke-width="1" stroke-dasharray="3 2"/>
-  </g>
-
-  <!-- Terminal highlight -->
-  <g id="hl-terminal" class="hl">
-    <rect x="72" y="176" width="144" height="34" fill="oklch(86% 0.171 134)" opacity=".12"/>
-    <rect x="72" y="176" width="144" height="1.5" fill="oklch(86% 0.171 134)" opacity=".5"/>
-    <circle cx="82" cy="198" r="4" fill="none" stroke="oklch(86% 0.171 134)" stroke-width="1.8" stroke-dasharray="10 6"/>
-    <rect x="92" y="194.5" width="104" height="7" rx="2" fill="oklch(86% 0.171 134)" opacity=".65"/>
-    <rect x="98" y="160" width="86" height="16" rx="3" fill="oklch(86% 0.171 134)"/>
-    <text x="141" y="171.5" text-anchor="middle" font-size="9" font-weight="600" fill="oklch(10% 0.004 135)">Terminal</text>
-    <line x1="141" y1="176" x2="141" y2="182" stroke="oklch(86% 0.171 134)" stroke-width="1" stroke-dasharray="3 2"/>
-  </g>
-</svg>`;
 
 // ── Client-side JavaScript ────────────────────────────────────────────────────
 //
@@ -916,9 +861,8 @@ const META = {
 };
 
 let state = JSON.parse(document.getElementById('initial-state').textContent);
-let hovered = null;  // currently hovered surface id
 let spinCells = [];  // animating glyphs on a format's page (tiles + preview); rebuilt per render
-let rcInfoOpen = false;  // "what does Control from web do" note, expanded via the header's (i) button
+let rcInfoOpen = false;  // "what does syncing across devices do" note, expanded via the header's (i) button
 let manualOpen = false;  // the conflict box's "do it yourself" alternative path
 
 // ── State application ──────────────────────────────────────────────────────
@@ -941,24 +885,28 @@ function render() {
 
   const panel = el('div', 'panel');
 
+  // Post-update "what's new" banner, one-time, above everything - it is about the extension version,
+  // independent of sign-in state.
+  if (state.justUpdated) panel.append(buildWhatsNew(state));
+
   // Header or sign-in
   if (signed) {
     const header = el('div', 'header');
     const displayName = (state.name && state.name.trim()) || state.email || '';
 
-    // Row 1: avatar + name/email, and the account-wide "let the web dashboard control this device"
-    // switch — off by default. Even on, every safety step (backup, atomic write, verify, fail-safe)
-    // still runs exactly as it does when a surface is picked here; this only decides whether that
-    // path needs a click here first, or the web's own request applies straight away.
+    // Row 1: avatar + name/email, and the account-wide "sync my settings across devices" switch — off
+    // by default. Even on, every safety step (backup, atomic write, verify, fail-safe) still runs
+    // exactly as it does when a surface is picked here; this only decides whether a format chosen on
+    // another device (or the dashboard) applies here on its own, or asks for a click here first.
     const row1 = el('div', 'header-row');
     const av = el('div', 'avatar');
     av.textContent = (displayName || '?')[0].toUpperCase();
     const he = el('div', 'header-email'); he.textContent = displayName;
     const rc = el('div', 'header-rc');
-    const rcLabel = el('span', 'hdr-toggle-label'); rcLabel.textContent = 'Control from web';
+    const rcLabel = el('span', 'hdr-toggle-label'); rcLabel.textContent = 'Sync across devices';
     const rcOn = !!state.remoteControlAllowed;
     const rcInfo = el('button', 'info-btn');
-    rcInfo.setAttribute('aria-label', 'What does this control?');
+    rcInfo.setAttribute('aria-label', 'What does syncing across devices do?');
     rcInfo.setAttribute('aria-expanded', rcInfoOpen ? 'true' : 'false');
     rcInfo.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round"><circle cx="8" cy="8" r="6.3" stroke-width="1.3"/><line x1="8" y1="5" x2="8" y2="5" stroke-width="1.7"/><line x1="8" y1="7.3" x2="8" y2="11" stroke-width="1.3"/></svg>';
     rcInfo.onclick = () => { rcInfoOpen = !rcInfoOpen; render(); };
@@ -966,8 +914,17 @@ function render() {
     if (rcOn) rcToggle.classList.add('on');
     rcToggle.setAttribute('role', 'switch');
     rcToggle.setAttribute('aria-checked', rcOn ? 'true' : 'false');
-    rcToggle.setAttribute('aria-label', 'Let the web dashboard control this device');
-    rcToggle.onclick = () => send('toggle-remote-control');
+    rcToggle.setAttribute('aria-label', 'Sync my Awaitful settings across devices');
+    // Echo the flip locally before telling the host, the same way the element switch does. Without
+    // it the knob only moves when the host pushes state back, and that push REBUILDS this node - so
+    // the new one mounts already in its final position and the 180ms slide never plays at all. The
+    // echo is optimistic, not authoritative: if the write fails, the host's state corrects it.
+    rcToggle.onclick = () => {
+      const next = !rcToggle.classList.contains('on');
+      rcToggle.classList.toggle('on', next);
+      rcToggle.setAttribute('aria-checked', next ? 'true' : 'false');
+      send('toggle-remote-control');
+    };
     // Info before the toggle: the switch is the actionable control, so it sits rightmost.
     rc.append(rcLabel, rcInfo, rcToggle);
     row1.append(av, he, rc);
@@ -992,13 +949,20 @@ function render() {
     const hsEye = el('span', 'header-sub-eye');
     const eyeLabel = el('span', 'hdr-toggle-label'); eyeLabel.textContent = 'Earning in status bar';
     const eye = el('button', 'eye-btn');
-    const shown = state.showEarningsInStatusBar;
-    eye.title = shown ? 'Earnings shown in the status bar - click to hide' : 'Earnings hidden from the status bar - click to show';
-    eye.setAttribute('aria-label', eye.title);
-    eye.innerHTML = shown
-      ? '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2.1"/></svg>'
-      : '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z" opacity=".45"/><circle cx="8" cy="8" r="2.1" opacity=".45"/><line x1="2.5" y1="2.5" x2="13.5" y2="13.5"/></svg>';
-    eye.onclick = () => send('toggle-statusbar-earnings');
+    // One function for both the first paint and the click echo, so the two cannot drift into
+    // disagreeing about which icon means "shown".
+    const paintEye = (on) => {
+      eye.title = on ? 'Earnings shown in the status bar - click to hide' : 'Earnings hidden from the status bar - click to show';
+      eye.setAttribute('aria-label', eye.title);
+      eye.setAttribute('aria-pressed', on ? 'true' : 'false');
+      eye.innerHTML = on
+        ? '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2.1"/></svg>'
+        : '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z" opacity=".45"/><circle cx="8" cy="8" r="2.1" opacity=".45"/><line x1="2.5" y1="2.5" x2="13.5" y2="13.5"/></svg>';
+    };
+    let eyeOn = state.showEarningsInStatusBar;
+    paintEye(eyeOn);
+    // Same optimistic echo as the switch above: repaint now, let the host's push confirm or correct.
+    eye.onclick = () => { eyeOn = !eyeOn; paintEye(eyeOn); send('toggle-statusbar-earnings'); };
     hsEye.append(eyeLabel, eye);
     row2.append(spacer, hsText, hsEye);
 
@@ -1007,11 +971,14 @@ function render() {
 
     if (rcInfoOpen) {
       const rcNote = el('div', 'header-rc-note');
-      rcNote.textContent = 'Off: a change from the dashboard needs your OK here first. On: it applies automatically. Either way, every file it touches is still backed up, verified, and safe to undo.';
+      rcNote.textContent = 'On: set your preferred customization from any device, including your Awaitful account. Off: keep these settings to this device only. Either way, any format Awaitful applies here is backed up, verified, and safe to undo.';
       panel.append(rcNote);
     }
+    // Onboarding, at the top of the settings, until every step is done or it is dismissed with its ✕.
+    if (stepperVisible(state)) panel.append(buildStepper(state));
   } else {
-    panel.append(buildSignIn());
+    // Signed out, the stepper IS the sign-in surface: step 1 active, steps 2-3 previewed, no ✕.
+    panel.append(buildStepper(state));
   }
 
   // Paused banner — prominent, forget-proof resume.
@@ -1079,13 +1046,8 @@ function render() {
     panel.append(ac);
   }
 
-  // Illustration
-  const iw = el('div', 'illus-wrap');
-  iw.innerHTML = ${JSON.stringify(ILLUSTRATION)};
-  panel.append(iw);
-
-  // Sync highlights
-  updateHighlight(getDefaultHighlight());
+  // Illustration, already aimed at the format that is earning.
+  panel.append(illusWrap(getDefaultHighlight()));
 
   // VS Code ad formats
   const sect1 = el('div', 'sect'); sect1.textContent = state.appName || 'Visual Studio Code';
@@ -1133,14 +1095,158 @@ function render() {
   root.append(panel);
 }
 
-function buildSignIn() {
-  const s = el('div', 'signin');
-  const logo = el('div', 'signin-logo'); logo.textContent = '◉';
-  const h3 = el('h3'); h3.textContent = 'Sign in to start earning';
-  const p = el('p'); p.textContent = 'Link your editor once. Earn every time your AI agent thinks.';
-  const btn = el('button', 'btn-primary'); btn.textContent = 'Sign in'; btn.onclick = () => send('sign-in');
-  s.append(logo, h3, p, btn);
-  return s;
+// Whether the onboarding stepper shows. Signed out it always does (it IS the sign-in surface); signed
+// in it shows until every step is done or it was dismissed with its ✕ (persisted device-local).
+function stepperVisible(state) {
+  if (!state.signedIn) return true;
+  if (state.onboardingDismissed) return false;
+  var premiumActive = (state.vsSurfaces || []).some(function (s) { return s.active && s.id !== 'status-bar'; });
+  var formatDone = premiumActive || !!state.terminalEnabled || state.remoteSurfacePref != null;
+  return !(formatDone && !!state.remoteControlAllowed);
+}
+
+// The 3-step onboarding guide. Every step's done/current/blocked state is DERIVED from panel state
+// (signed in, a format active, sync on) - there are no stored step flags to orphan. Only the ✕ is
+// persisted. The step buttons reuse the exact messages the rest of the panel already sends, so the
+// existing consent + patch-war + reload flow runs unchanged: no activation path is reinvented here.
+function buildStepper(state) {
+  var box = el('div', 'stepper');
+
+  // ✕ dismiss — only once signed in; the signed-out stepper is the sign-in surface, nothing to skip to.
+  if (state.signedIn) {
+    var x = el('button', 'stepper-x');
+    x.setAttribute('aria-label', 'Dismiss setup');
+    x.title = 'Dismiss setup';
+    x.textContent = '×';
+    x.onclick = function () { send('dismiss-onboarding'); };
+    box.append(x);
+  }
+
+  var title = el('div', 'stepper-title'); title.textContent = 'Set up Awaitful';
+  var sub = el('div', 'stepper-sub'); sub.textContent = 'Three steps to start earning.';
+  box.append(title, sub);
+
+  // ── Derived step state ──
+  // A deliberate dashboard format choice (even status-bar) settles the format step - never nag a user to
+  // turn on a format they chose to move away from on the web (see PanelState.remoteSurfacePref).
+  var premiumActive = (state.vsSurfaces || []).some(function (s) { return s.active && s.id !== 'status-bar'; });
+  var formatDone = premiumActive || !!state.terminalEnabled || state.remoteSurfacePref != null;
+  var best = state.bestUpgrade;                 // 'chat-banner' | 'thinking-line' | 'terminal' | undefined
+  var fmtName = best === 'thinking-line' ? 'thinking line' : best === 'terminal' ? 'terminal' : 'chat banner';
+  var fmtTitle = fmtName.charAt(0).toUpperCase() + fmtName.slice(1);
+  var rate;
+  if (best === 'terminal') rate = state.terminalEarnRate;
+  else { var sc = (state.vsSurfaces || []).find(function (s) { return s.id === best; }); rate = sc && sc.earnRate; }
+  // A real webview that is present but held by a competitor right now: onboarding routes through its own
+  // guided conflict flow, not the terminal (see pickBestUpgrade), so step 2 opens that card to fix it.
+  var contested = (state.vsSurfaces || [])
+    .filter(function (s) { return (s.id === 'chat-banner' || s.id === 'thinking-line') && s.available && s.conflict && !s.active; })
+    .sort(function (a, b) { return (b.earnRate || 0) - (a.earnRate || 0); })[0];
+
+  // Step 2: done -> a check; a real upgrade -> offer it; a contested webview -> resolve the conflict;
+  // otherwise (no Claude Code / no editor here) -> the blocked note. Never divert a contested webview to
+  // the terminal - the status bar stays the fallback and the conflict is the thing to fix.
+  var step2;
+  if (formatDone) {
+    step2 = { title: 'Ad format is on', sub: 'Your sponsored line is in a higher-earning spot.' };
+  } else if (best) {
+    var s2sub = best === 'terminal' ? 'Stacks on your status bar to earn a little more.'
+      : (rate ? 'Earns about ' + rate + 'x the status bar.' : 'Show your sponsored line where it earns the most.');
+    step2 = {
+      title: fmtTitle, sub: s2sub, btn: 'Turn on ' + fmtName,
+      go: function () { if (best === 'terminal') send('toggle-terminal'); else send('consent-grant', { id: best }); },
+    };
+  } else if (contested) {
+    step2 = {
+      title: 'Turn on the chat banner',
+      sub: 'Another extension is using Claude Code right now. Open it to put the original back, then turn this on.',
+      btn: 'Resolve the conflict',
+      go: function () { openDetail(contested.id); },
+    };
+  } else {
+    step2 = {
+      title: 'Turn on the chat banner',
+      sub: 'Show your sponsored line where it earns the most.',
+      blocked: true,
+      blockedNote: 'Install Claude Code and an editor here to turn this on.',
+    };
+  }
+
+  var steps = [
+    {
+      title: 'Sign in',
+      sub: 'Link this editor to your Awaitful account.',
+      done: !!state.signedIn,
+      btn: 'Sign in',
+      go: function () { send('sign-in'); },
+    },
+    {
+      title: step2.title,
+      sub: step2.sub,
+      done: formatDone,
+      blocked: !!step2.blocked,
+      blockedNote: step2.blockedNote,
+      btn: step2.btn,
+      go: step2.go,
+    },
+    {
+      title: 'Sync across your devices',
+      sub: 'Apply the format you choose here to every device on your Awaitful account, automatically.',
+      done: !!state.remoteControlAllowed,
+      btn: 'Turn on sync',
+      go: function () { send('toggle-remote-control'); },
+    },
+  ];
+
+  // The one actionable step: the first that is neither done nor blocked. Only it shows a button, so the
+  // stepper reads straight down - finish this one, the next lights up.
+  var currentIdx = -1;
+  for (var i = 0; i < steps.length; i++) { if (!steps[i].done && !steps[i].blocked) { currentIdx = i; break; } }
+
+  for (var j = 0; j < steps.length; j++) {
+    var st = steps[j];
+    var cls = st.done ? 'done' : st.blocked ? 'blocked' : (j === currentIdx ? 'current' : 'todo');
+    var row = el('div', 'step ' + cls);
+
+    var rail = el('div', 'step-rail');
+    var num = el('div', 'step-num'); num.textContent = st.done ? '✓' : String(j + 1);
+    rail.append(num);
+
+    var main = el('div', 'step-main');
+    var stt = el('div', 'step-title'); stt.textContent = st.title;
+    var sts = el('div', 'step-sub'); sts.textContent = st.sub;
+    main.append(stt, sts);
+
+    if (j === currentIdx && st.btn) {
+      var act = el('div', 'step-act');
+      var b = el('button', 'btn-primary'); b.textContent = st.btn; b.onclick = st.go;
+      act.append(b);
+      main.append(act);
+    } else if (st.blocked && st.blockedNote) {
+      var bn = el('div', 'step-blocked-note'); bn.textContent = st.blockedNote;
+      main.append(bn);
+    }
+
+    row.append(rail, main);
+    box.append(row);
+  }
+
+  return box;
+}
+
+// The post-update banner. Shown once when the version changed since this machine last saw the panel;
+// both actions mark it seen so it does not return. A gentle cue, not a modal - it links to the notes
+// rather than interrupting.
+function buildWhatsNew(state) {
+  var bar = el('div', 'whatsnew');
+  var spark = el('span', 'whatsnew-spark'); spark.textContent = '✦';
+  var txt = el('span', 'whatsnew-text'); txt.textContent = 'Updated to v' + (state.version || '');
+  var see = el('button', 'whatsnew-cta'); see.textContent = "See what's new";
+  see.onclick = function () { send('whats-new'); };
+  var x = el('button', 'whatsnew-x'); x.setAttribute('aria-label', 'Dismiss'); x.title = 'Dismiss'; x.textContent = '×';
+  x.onclick = function () { send('dismiss-whats-new'); };
+  bar.append(spark, txt, see, x);
+  return bar;
 }
 
 function buildPrivacyStrip() {
@@ -1305,8 +1411,8 @@ function buildCard(sv, showConflict) {
   cardOpens(card, sv.id, { blocked, locked, active, label: m.label || sv.id, rate: sv.earnRate });
 
   // Highlight illustration on hover
-  card.addEventListener('mouseenter', () => { hovered = sv.id; updateHighlight(sv.id); });
-  card.addEventListener('mouseleave', () => { hovered = null; updateHighlight(getDefaultHighlight()); });
+  card.addEventListener('mouseenter', () => updateHighlight(sv.id));
+  card.addEventListener('mouseleave', () => updateHighlight(getDefaultHighlight()));
 
   const icon = el('div', 'card-icon'); icon.textContent = m.icon || '□';
   const body = el('div', 'card-body');
@@ -1481,8 +1587,8 @@ function buildTerminalCard() {
   if (blocked) card.classList.add('blocked');
   if (locked) { card.classList.add('locked'); card.title = 'Sign in to activate'; }
   cardOpens(card, 'terminal', { blocked, locked, active, label: m.label, rate: state.terminalEarnRate });
-  card.addEventListener('mouseenter', () => { hovered = 'terminal'; updateHighlight('terminal'); });
-  card.addEventListener('mouseleave', () => { hovered = null; updateHighlight(getDefaultHighlight()); });
+  card.addEventListener('mouseenter', () => updateHighlight('terminal'));
+  card.addEventListener('mouseleave', () => updateHighlight(getDefaultHighlight()));
 
   const icon = el('div', 'card-icon'); icon.textContent = '>_'; icon.style.fontFamily = 'monospace';
   const body = el('div', 'card-body');
@@ -1540,11 +1646,13 @@ function buildTerminalCard() {
   return card;
 }
 
-// The detail illustration, shared by every detail page (injected once, so the big SVG is not
-// duplicated across pages - keeps the panel small). Callers highlight their own surface after.
-function illusWrap() {
+// The illustration, shared by the format list and every detail page. Genuinely injected once now:
+// the artwork used to be interpolated at two call sites, so every panel carried ~10 KB of it twice.
+// The caller names the region to light, and it is set before the node is in the document.
+function illusWrap(active) {
   const iw = el('div', 'illus-wrap');
-  iw.innerHTML = ${JSON.stringify(ILLUSTRATION)};
+  iw.setAttribute('data-active', active);
+  iw.innerHTML = ${JSON.stringify(WIREFRAME_SVG)};
   return iw;
 }
 
@@ -1641,8 +1749,7 @@ function buildStatusBarDetail() {
   const back = backButton();
   panel.append(back);
 
-  panel.append(illusWrap());
-  setTimeout(() => updateHighlight('status-bar'), 0);
+  panel.append(illusWrap('status-bar'));
 
   const titleRow = el('div', 'card-name-row');
   const title = el('div', 'detail-title'); title.textContent = m.label;
@@ -2235,9 +2342,7 @@ function buildDetailView(id) {
   const back = backButton();
   panel.append(back);
 
-  panel.append(illusWrap());
-  // Highlight the surface in the detail illustration
-  setTimeout(() => updateHighlight(id), 0);
+  panel.append(illusWrap(id));
 
   const titleRow = el('div', 'card-name-row');
   const title = el('div', 'detail-title'); title.textContent = m.label || id;
@@ -2379,12 +2484,10 @@ function getDefaultHighlight() {
   return active ? active.id : 'status-bar';
 }
 
+// Aim the illustration at one region. The picture decides what that means in CSS, so this is a
+// single attribute write rather than four id lookups - and it cannot half-apply.
 function updateHighlight(id) {
-  const ids = ['status-bar', 'chat-banner', 'thinking-line', 'terminal'];
-  for (const hlId of ids) {
-    const el = document.getElementById('hl-' + hlId);
-    if (el) el.classList.toggle('on', hlId === id);
-  }
+  for (const iw of document.querySelectorAll('.illus-wrap')) iw.setAttribute('data-active', id);
 }
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────

@@ -9,10 +9,30 @@ export const RemoteSurfacePreferenceRequestSchema = z.object({
   surface: RemoteSurfaceIdSchema.nullable(),
 });
 
-/** A device reporting the surface it just confirmed applying - never null, since "applying nothing"
- *  is not an action a device takes. */
+/** Naming one linked machine, from the web. Trimmed, capped, and an empty name means "clear it" -
+ *  the row then falls back to its id tail rather than showing a blank. */
+export const DeviceLabelRequestSchema = z.object({
+  label: z.string().trim().max(40).nullable().transform(v => (v === null || v === '' ? null : v)),
+});
+
+/** Coarse, privacy-safe reason a web-requested surface could not be applied on a device - stored and
+ *  shown so the dashboard can replace an endless "confirm in your editor" with the real cause. Never a
+ *  path, filename, or vendor identifier; the device maps its internal reasons down to this small set. */
+export const SurfaceApplyFailureSchema = z.enum([
+  'unsupported-build',    // a clean file, but this Claude Code build has no verified recipe / no target
+  'foreign-conflict',     // another tool is holding Claude Code's files
+  'health-check-failed',  // the patch applied but did not verify and was rolled back
+  'settings-read-only',   // (terminal) ~/.claude/settings.json could not be written
+  'error',                // anything else, kept coarse on purpose
+]);
+
+/** A device reporting the surface it ended up on, and - when a web-requested surface could not be
+ *  applied - the coarse reason. `surface` is never null (a device always ends on SOME surface, the
+ *  status bar at worst); `failure` is absent/null on success, so an older client that omits it reads
+ *  as a success, unchanged. */
 export const SurfaceAppliedRequestSchema = z.object({
   surface: RemoteSurfaceIdSchema,
+  failure: SurfaceApplyFailureSchema.nullish(),
 });
 
 /** The terminal is additive, so it is its own on/off request rather than a fourth surface id.
@@ -24,6 +44,12 @@ export const RemoteTerminalPreferenceRequestSchema = z.object({
 /** A device reporting what its terminal status line actually ended up as. Never null: a device only
  *  reports an outcome it reached, and "did nothing" is not one. */
 export const TerminalAppliedRequestSchema = z.object({
+  enabled: z.boolean(),
+});
+
+/** A device reporting its own "Control from web" opt-in state (whether it will auto-apply a web-set
+ *  format without a local confirm). One boolean about this device; the web reads it, never sets it. */
+export const AutoApplyReportSchema = z.object({
   enabled: z.boolean(),
 });
 
@@ -80,6 +106,7 @@ export const AdSlateResponseSchema = z.object({
   // Must be declared here or zod strips it: plain z.object() drops unknown keys, so an undeclared
   // field silently never reaches the client and the settings fast-path would quietly do nothing.
   prefsVersion: z.number().int().nonnegative().optional(),
+  settingsVersion: z.number().int().nonnegative().optional(),
 });
 
 export const AdEventSchema = z.object({
@@ -132,11 +159,60 @@ export type GetAdQueryInput = z.input<typeof GetAdQuerySchema>;
  */
 const uploadedIcon = z.string().startsWith('data:', 'Not an image').max(8_000_000);
 
+/**
+ * A URL we are willing to store, hand to a browser, or fetch.
+ *
+ * `z.string().url()` is NOT that check. Zod delegates to `new URL()`, which happily accepts
+ * `javascript:alert(1)`, `data:text/html,...` and `file:///etc/passwd` - every one of them a valid
+ * URL and none of them something an advertiser should be able to put in front of a developer or
+ * point our server at. The scheme is the whole security boundary here, so it is asserted explicitly.
+ */
+export const httpUrl = (message = 'Must be a full URL, starting with https://') =>
+  z
+    .string()
+    .url(message)
+    .refine(v => {
+      try {
+        const p = new URL(v).protocol;
+        return p === 'https:' || p === 'http:';
+      } catch {
+        return false;
+      }
+    }, message);
+
+/**
+ * Reading a site's own metadata so an advertiser does not have to retype it.
+ *
+ * The URL is the advertiser's landing page. Everything in the result is a SUGGESTION the advertiser
+ * edits - nothing here is authoritative, and any field the page did not offer simply comes back
+ * absent rather than guessed.
+ */
+export const SitePrefillRequestSchema = z.object({
+  url: httpUrl('Enter a full URL, starting with https://'),
+});
+
+export const SitePrefillResultSchema = z.object({
+  /** The URL we actually ended up at, after redirects. Apex -> www is the common case. */
+  finalUrl: z.string(),
+  /** A suggested ad line, already cut to the 60-character contract. */
+  line: z.string().max(60).optional(),
+  /** og:site_name, or the site's title with any trailing tagline removed. */
+  brandName: z.string().max(40).optional(),
+  /**
+   * The site's icon, ALREADY downloaded and processed into the same bounded WebP `data:` URI a
+   * logo upload produces. Never a remote URL: a developer's editor must never fetch from an
+   * advertiser's server (PRIVACY.md), and the webview CSP would block it anyway.
+   */
+  brandIconData: z.string().startsWith('data:').optional(),
+  /** What we could not find, so the form can say so instead of silently leaving gaps. */
+  missing: z.array(z.enum(['line', 'brandName', 'brandIconData'])),
+});
+
 export const CreateCampaignSchema = z.object({
   line: z.string().min(3, 'At least 3 characters').max(60, 'At most 60 characters'),
-  url: z.string().url('Must be a valid URL').optional(),
+  url: httpUrl('Must be a valid URL').optional(),
   brandName: z.string().max(40).optional(),
-  brandIconUrl: z.string().url('Must be a valid URL').optional(),
+  brandIconUrl: httpUrl('Must be a valid URL').optional(),
   brandIconData: uploadedIcon.optional(),
   bidCpm: z.number().positive().min(0.01, 'Minimum bid is $0.01'),
   dailyBudget: z.number().positive().min(1, 'Minimum budget is $1.00'),
@@ -148,9 +224,9 @@ export const CreateCampaignSchema = z.object({
 
 export const UpdateCampaignSchema = z.object({
   line: z.string().min(3).max(60).optional(),
-  url: z.string().url().nullable().optional(),
+  url: httpUrl().nullable().optional(),
   brandName: z.string().max(40).nullable().optional(),
-  brandIconUrl: z.string().url().nullable().optional(),
+  brandIconUrl: httpUrl().nullable().optional(),
   brandIconData: uploadedIcon.nullable().optional(),
   bidCpm: z.number().positive().min(0.01).optional(),
   dailyBudget: z.number().positive().min(1).optional(),

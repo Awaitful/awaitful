@@ -114,10 +114,8 @@ export const DEFAULT_BANNER_FRAME = 'banner';
 /**
  * Whether an advertiser's logo shows when the ad carries one.
  *
- * MUST equal `contributes.configuration.properties["awaitful.adBrandLogo"].default` in the
- * extension's package.json - VS Code owns that default and a manifest cannot import from here, so
- * the two are tied by a test rather than by code. The web reads this to describe what an editor
- * does when the account has set no preference; if the two drift, the web states a default that is
- * not the one running.
+ * The single source for this default. It used to have to match a VS Code manifest entry, tied by a
+ * test because a manifest cannot import from here; that setting is gone, so this value now stands
+ * alone. The web reads it to describe what an editor does when the account has set no preference.
  */
 export const DEFAULT_BRAND_LOGO = true;

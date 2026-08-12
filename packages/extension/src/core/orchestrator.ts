@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { LINKS, GLOW_KEYFRAMES, AD_FORMATS, getSpinner, frameAt, allFormatSettings, type AdFormatId, type ElementId, type ElementValue } from '@awaitful/shared';
-import type { AdEvent, StatusBarState, PlacementId, Creative, RemoteSurfaceId, AdSpinner, AdPreferences } from '@awaitful/shared';
-import { apiBaseUrl } from '../lib/config.js';
+import type { AdEvent, StatusBarState, PlacementId, Creative, RemoteSurfaceId, AdSpinner, AdPreferences, SurfaceApplyFailure } from '@awaitful/shared';
+import { apiBaseUrl, REDUCE_MOTION_SETTING } from '../lib/config.js';
 import { SlateCache } from './slateCache.js';
 import { KillswitchMonitor } from '../killswitch/monitor.js';
 import { EventQueue } from '../metrics/eventQueue.js';
@@ -53,16 +53,30 @@ import {
 import { writeStatusLineScript, removeStatusLineScript, statusLineScriptPath } from '../hooks/statusLineScript.js';
 import { formatTerminalLine } from './terminalFormat.js';
 import { HttpError } from '../lib/http.js';
+import { pickBestUpgrade } from './upgradePick.js';
+import { mapApplyFailure } from './applyFailure.js';
 
 // Persisted soft-pause state, so "Paused" survives a restart (like a real Off switch).
 const ENABLED_KEY = 'awaitful.enabled';
 // The chosen webview placement (thinking-line OR chat-banner) persists across restarts so the
 // patch re-applies to the right surface; they are mutually exclusive and share one patch.
 const WEBVIEW_SURFACE_KEY = 'awaitful.webviewSurface';
-// One-time-per-VALUE gate for the "your dashboard set X" toast in reconcileRemoteSurfacePreference -
-// keyed by the requested surface, so a later, DIFFERENT dashboard request still prompts even if an
-// earlier one was ignored.
-const REMOTE_SURFACE_PROMPTED_KEY = (id: RemoteSurfaceId) => `awaitful.remoteSurfacePrompted.${id}`;
+/**
+ * Which surface the "your dashboard set X" toast was last shown for - ONE value, not a flag per
+ * surface. A request prompts whenever it differs from what is stored, and the store is cleared once
+ * the request is withdrawn or applied, so asking for the same surface again later lands.
+ *
+ * This replaces `awaitful.remoteSurfacePrompted.<id>` booleans, which were written true and never
+ * cleared anywhere. That made the gate permanent per surface: the FIRST dashboard request for a
+ * given surface was the only one that ever reached the developer. Since switching to the status bar
+ * applies silently and never prompts at all, a developer who had tried the thinking line and the
+ * chat banner once each got silence from the dashboard from then on - while the terminal, whose gate
+ * did clear itself, kept working and made the difference look like a surface-only bug.
+ *
+ * Reading a different key is also what repairs an already-stuck install: the stale booleans are
+ * simply never consulted again, so no migration is needed.
+ */
+const REMOTE_SURFACE_PROMPTED_KEY = 'awaitful.remoteSurfacePromptedFor';
 const TERMINAL_ENABLED_KEY = 'awaitful.terminalEnabled';
 // One-time gate for the "your dashboard asked to turn the terminal on" toast. A single key, not one
 // per value: the request is a boolean, and the only prompting case is turning it ON (off needs no
@@ -97,6 +111,12 @@ const SHOW_EARNINGS_KEY = 'awaitful.showEarningsInStatusBar';
 // Off by default. On: reconcileRemoteSurfacePreference may apply a webview surface without the
 // one-time toast - this device's own opt-in stands in for the per-surface click-through consent.
 const REMOTE_CONTROL_KEY = 'awaitful.remoteControlAllowed';
+// Device-local: the onboarding stepper was dismissed with its ✕. Persisted so it never returns on this
+// machine (the format cards + sync toggle remain the way to change things after).
+const ONBOARDING_DISMISSED_KEY = 'awaitful.onboardingDismissed';
+// The extension version this machine last acknowledged in the panel. Drives the one-time post-update
+// "what's new" banner: a mismatch with the running version means we updated since it was last seen.
+const LAST_SEEN_VERSION_KEY = 'awaitful.lastSeenVersion';
 // Latches true the first time the agent-thinking hook ever fires on this machine. Drives the panel's
 // "no agent activity yet" hint: until we have seen a single thinking event, a signed-in developer is
 // almost certainly on a different agent or not driving Claude Code through the extension.
@@ -108,6 +128,10 @@ const PLACEMENT_NUDGE_KEY = 'awaitful.placementNudgeShown';
 // Last account settings-version applied in THIS editor. Absent on a fresh install, so the first
 // check-in inherits the account's choices - the reason the web card exists at all.
 const PREFS_VERSION_KEY = 'awaitful.prefsVersion';
+// Separate from PREFS_VERSION_KEY: this tracks the SURFACE/TERMINAL push version, so a format change
+// lands within a slate poll without disturbing the ad-styling ratchet above (which would clobber a
+// developer's local look edits if it moved on a mere surface change).
+const SETTINGS_VERSION_KEY = 'awaitful.settingsVersion';
 // A competitor that also patches Claude Code can overwrite our take-over on reload. We RECLAIM the
 // surface (restore the verified original + re-apply) a bounded number of times — winning against a
 // passive competitor — before yielding honestly to an aggressive one. Awaitful never touches another
@@ -213,8 +237,8 @@ export class Orchestrator {
   /**
    * The webview ad's OWN logo, before the developer's preference is applied. `undefined` whenever
    * the ad simply has none, which is most of them (a logo is optional for the advertiser). Kept so
-   * that switching `awaitful.adBrandLogo` back on restores what the ad really had, and never invents
-   * a logo for an ad that never carried one.
+   * that switching this format's logo back on restores what the ad really had, and never invents a
+   * logo for an ad that never carried one.
    */
   private activeIconUrl: string | undefined;
   private activePlacement: PlacementId = 'status-bar';
@@ -295,9 +319,33 @@ export class Orchestrator {
   private lastReportedSurface: RemoteSurfaceId | undefined;
   /** Last terminal state reported, so an unchanged one is not re-sent on every check-in. */
   private lastReportedTerminal: boolean | undefined;
+  /** The coarse apply-failure to report for THIS device: null once the last apply succeeded (or none was
+   *  attempted). Set at the single choke point (enableWebviewSurface / switchToStatusBar) so it is honest
+   *  regardless of what triggered the attempt. Lets the dashboard show WHY a format did not switch on. */
+  private lastApplyFailure: SurfaceApplyFailure | null = null;
+  /** The failure value last reported, so a steady state does not re-POST every cycle. `undefined` = never
+   *  reported, so the first report always goes out. */
+  private lastReportedFailure: SurfaceApplyFailure | null | undefined = undefined;
+  /** Last "Control from web" state reported, so an unchanged one is not re-sent every check-in. */
+  private lastReportedControl: boolean | undefined;
   private showEarningsInStatusBar = true;
   private remoteControlAllowed = false;
   private lastAccountFetchMs = 0;
+  /** Set on each explicit sign-in, consumed once by the first post-sign-in refresh to open the panel on
+   *  the setup stepper. In-memory only: a fresh sign-in re-opens, a window reload does not (that is not a
+   *  sign-in), and nothing is persisted - so there is no state to orphan. */
+  private onboardingOpenPending = false;
+  /** True when the running version differs from the one this machine last saw - drives the one-time
+   *  "what's new" banner. Computed once in the constructor. Stays visible for the session it is
+   *  detected in (noteWhatsNewShown persists the version so the NEXT launch is silent), and clears
+   *  immediately if the developer acts on it (markVersionSeen). Either way it never nags twice. */
+  private justUpdated = false;
+  /** The account's web-set format preference from the last /v1/me. A non-null value - including
+   *  "status-bar" - is a deliberate format choice made on the dashboard, so the onboarding stepper
+   *  treats its format step as settled and never pushes a different format against it. Without this, a
+   *  status-bar dashboard choice reverted the device and the stepper kept nagging to re-enable the
+   *  chat banner - the choice it was told to respect. */
+  private remoteSurfacePref: RemoteSurfaceId | null = null;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     const base = apiBaseUrl();
@@ -316,6 +364,16 @@ export class Orchestrator {
     this.showEarningsInStatusBar = context.globalState.get<boolean>(SHOW_EARNINGS_KEY) !== false; // default on
     this.remoteControlAllowed = context.globalState.get<boolean>(REMOTE_CONTROL_KEY) === true; // default off
     this.everThought = context.globalState.get<boolean>(EVER_THOUGHT_KEY) === true; // default false
+    // Post-update detection. A fresh install (no stored version) shows nothing new but records the
+    // current version, so the NEXT update is caught. A stored version that differs from the running
+    // one means we updated since it was last seen - show the banner until it is acknowledged.
+    const runningVersion = context.extension.packageJSON.version as string;
+    const lastSeenVersion = context.globalState.get<string>(LAST_SEEN_VERSION_KEY);
+    if (lastSeenVersion === undefined) {
+      void context.globalState.update(LAST_SEEN_VERSION_KEY, runningVersion);
+    } else if (lastSeenVersion !== runningVersion) {
+      this.justUpdated = true;
+    }
     this.account = new AccountClient(base);
     // Patch the build VS Code is actually running, not merely the newest on disk.
     const activeDir = () => vscode.extensions.getExtension('anthropic.claude-code')?.extensionPath;
@@ -380,17 +438,15 @@ export class Orchestrator {
       }),
     );
 
-    // The two old account-wide settings are a read-only seed now (deprecated in the manifest, and
-    // nothing writes them), but a machine that still carries one can edit it in settings.json - so
-    // honour that live rather than leave a visible control that appears to do nothing.
+    // Reduced motion is read when the ad goes up, so a change while one is already showing would
+    // otherwise not land until the next thinking turn. refreshAd() re-runs showAd() with the current
+    // preference, which either starts the ticker or drops to the static dot.
     this.context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('awaitful.adSpinner') || e.affectsConfiguration('awaitful.adBrandLogo')) {
-          this.restyleLive();
-          this.syncPanel();
-        }
+        if (e.affectsConfiguration(REDUCE_MOTION_SETTING)) this.ui.refreshAd();
       }),
     );
+
 
     this.killswitch.onKillswitchChange((killed) => {
       if (killed) this.haltImpression(); // a server kill must also stop an in-flight impression
@@ -494,6 +550,15 @@ export class Orchestrator {
       const prefsTimer = setInterval(() => {
         const v = this.slate.prefsVersion;
         if (v !== undefined && v !== this.context.globalState.get<number>(PREFS_VERSION_KEY)) {
+          void this.refreshAccount(true);
+        }
+        // Surface/terminal pushes carry their own version so a format change lands within a minute
+        // without touching the styling ratchet above. Stored optimistically: the surface reconcile is
+        // idempotent (it compares the requested surface to the active one), so a missed refresh still
+        // applies on the next natural one - the version only decides when we look sooner.
+        const sv = this.slate.settingsVersion;
+        if (sv !== undefined && sv !== this.context.globalState.get<number>(SETTINGS_VERSION_KEY)) {
+          void this.context.globalState.update(SETTINGS_VERSION_KEY, sv);
           void this.refreshAccount(true);
         }
       }, 60_000);
@@ -1212,6 +1277,21 @@ export class Orchestrator {
     this.remoteControlAllowed = !this.remoteControlAllowed;
     await this.context.globalState.update(REMOTE_CONTROL_KEY, this.remoteControlAllowed);
     this.syncPanel();
+    void this.reportControlAllowed(); // let the dashboard reflect this editor's new opt-in promptly
+  }
+
+  /** Report this device's "Control from web" opt-in so the dashboard shows which editors will auto-apply
+   *  a web-set format. De-duped like the other reports; best-effort, retried next cycle on failure. */
+  private async reportControlAllowed(): Promise<void> {
+    if (!this.currentToken) return;
+    if (this.lastReportedControl === this.remoteControlAllowed) return;
+    const enabled = this.remoteControlAllowed;
+    try {
+      await this.account.reportControlAllowed(this.currentToken, enabled);
+      this.lastReportedControl = enabled;
+    } catch {
+      // Swallow - lastReportedControl stays put, so the next cycle retries.
+    }
   }
 
   /**
@@ -1281,12 +1361,14 @@ export class Orchestrator {
     if (me.status === 'fulfilled') {
       this.accountEmail = me.value.email;
       this.accountName = me.value.name ?? undefined;
+      this.remoteSurfacePref = me.value.remoteSurfacePreference;
       // Awaited (unlike the rest of this method's fire-and-forget callers) so the report below
       // always reflects activeSurface AFTER reconciliation settles, not mid-flight.
       await this.reconcileRemoteSurfacePreference(me.value.remoteSurfacePreference);
       await this.reconcileRemoteTerminalPreference(me.value.remoteTerminalEnabled);
       void this.reportAppliedSurface();
       void this.reportAppliedTerminal();
+      void this.reportControlAllowed();
       void this.reconcileAdPreferences(me.value.adPreferences, this.slate.prefsVersion);
     }
     if (earnings.status === 'fulfilled') {
@@ -1309,12 +1391,20 @@ export class Orchestrator {
    */
   private maybeNudgePlacements(): void {
     if (this.context.globalState.get<boolean>(PLACEMENT_NUDGE_KEY) === true) return;
+    // Hold off while the setup stepper is still guiding them: the stepper already offers the format
+    // upgrade, so a second toast saying the same thing would just be the "too many notifications" the
+    // stepper was meant to replace. Once onboarding is done or dismissed, this returns to normal.
+    if (this.onboardingIncomplete()) return;
     // Never while paused: the copy says "you are earning", which must be true when shown, and a paused
     // mis-fire would also burn the one-shot flag so the real nudge never appears once they resume.
     if (!this.enabled) return;
     const earned = parseFloat(this.unredeemedUsd ?? '0') > 0 || parseFloat(this.earningsToday ?? '0') > 0;
     const onBaseOnly = this.activeSurface === 'status-bar' && !this.terminalEnabled;
     if (!earned || !onBaseOnly) return;
+    // Only nudge toward a format this machine can actually use - never tell a CLI-only / editor-less
+    // developer to use a spot they cannot turn on. Same honest definition of "best" the first-run moment
+    // uses, so the two never disagree.
+    if (!pickBestUpgrade(this.buildPanelState())) return;
     // Set the flag before showing so a concurrent refresh can never double-fire it.
     void this.context.globalState.update(PLACEMENT_NUDGE_KEY, true);
     void vscode.window
@@ -1325,6 +1415,50 @@ export class Orchestrator {
       .then((pick) => {
         if (pick === 'Show placements') this.openPanel();
       });
+  }
+
+  /**
+   * First-run onboarding open. Once per sign-in, open the panel so the developer sees the setup stepper
+   * (sign in / turn on a format / sync). It only OPENS the panel - it never activates a format on its
+   * own; the stepper's own buttons carry the unchanged one-tap consent + fail-safe patch flow. Silent
+   * for a returning, fully-set-up developer, or one who dismissed the stepper: onboardingIncomplete()
+   * gates it on the same derived state the webview's stepperVisible() uses, so the two never disagree.
+   */
+  private async maybeOpenOnboarding(): Promise<void> {
+    if (!this.onboardingOpenPending) return;
+    this.onboardingOpenPending = false; // once per sign-in; never re-fire on later refreshes
+    if (!this.currentToken || !this.enabled) return;
+    // Capability changes about twice in a developer's life; refresh it once so bestUpgrade (the stepper's
+    // format target) is honest before the panel reads it.
+    await this.refreshPresence();
+    if (!this.onboardingIncomplete()) return;
+    this.openPanel();
+  }
+
+  /** True while any onboarding step is still open on this machine and the stepper was not dismissed - the
+   *  host-side mirror of the webview's stepperVisible(), so the auto-open and the panel agree, and the
+   *  discoverability nudge holds off until the guided setup is out of the way. */
+  private onboardingIncomplete(): boolean {
+    if (this.context.globalState.get<boolean>(ONBOARDING_DISMISSED_KEY) === true) return false;
+    // A deliberate dashboard format choice (even status-bar) settles the format step - see remoteSurfacePref.
+    const formatDone = this.activeSurface !== 'status-bar' || this.terminalEnabled || this.remoteSurfacePref !== null;
+    return !(formatDone && this.remoteControlAllowed);
+  }
+
+  /** Record the running version as acknowledged and drop the "what's new" banner NOW. Called from either
+   *  banner action (the ✕ or "See what's new"), so it clears immediately this session too. */
+  private markVersionSeen(): void {
+    void this.context.globalState.update(LAST_SEEN_VERSION_KEY, this.context.extension.packageJSON.version as string);
+    this.justUpdated = false;
+    this.syncPanel();
+  }
+
+  /** The banner has now had its chance to be seen - the panel is open on the main view where it lives.
+   *  Persist the version so it does NOT return on the next launch, but keep justUpdated so it stays
+   *  visible for the rest of THIS session. A what's-new note should show once, not nag every restart. */
+  private noteWhatsNewShown(): void {
+    if (!this.justUpdated) return;
+    void this.context.globalState.update(LAST_SEEN_VERSION_KEY, this.context.extension.packageJSON.version as string);
   }
 
   /**
@@ -1345,11 +1479,19 @@ export class Orchestrator {
    *     own review page, where the developer confirms through the panel's existing consent flow.
    */
   private async reconcileRemoteSurfacePreference(pref: RemoteSurfaceId | null): Promise<void> {
+    // Withdraw the gate once there is nothing outstanding to prompt for, so a later ask lands. Runs
+    // BEFORE the early returns: a request that is null, or that this device has already applied, is
+    // exactly when the gate should lift. Same rule the terminal reconciler has always had.
     // `== null`, so an ABSENT field is treated the same as an explicit null. A server that predates
     // this field omits it entirely, and `undefined === null` is false - so a strict check falls
     // straight through and acts on a request nobody made. See the terminal reconciler below, where
     // exactly that shipped and switched the status line on by itself.
-    if (pref == null || pref === this.activeSurface) return;
+    if (pref == null || pref === this.activeSurface) {
+      if (this.context.globalState.get<string>(REMOTE_SURFACE_PROMPTED_KEY) !== undefined) {
+        await this.context.globalState.update(REMOTE_SURFACE_PROMPTED_KEY, undefined);
+      }
+      return;
+    }
 
     if (pref === 'status-bar') {
       await this.switchToStatusBar();
@@ -1361,9 +1503,10 @@ export class Orchestrator {
       return;
     }
 
-    const promptedKey = REMOTE_SURFACE_PROMPTED_KEY(pref);
-    if (this.context.globalState.get<boolean>(promptedKey) === true) return;
-    await this.context.globalState.update(promptedKey, true);
+    // Prompt once per distinct outstanding request: silence while the same one stands, a fresh
+    // toast the moment the dashboard asks for something else.
+    if (this.context.globalState.get<string>(REMOTE_SURFACE_PROMPTED_KEY) === pref) return;
+    await this.context.globalState.update(REMOTE_SURFACE_PROMPTED_KEY, pref);
 
     const label = surfaceLabel(pref);
     const pick = await vscode.window.showInformationMessage(
@@ -1452,13 +1595,17 @@ export class Orchestrator {
    */
   private async reportAppliedSurface(): Promise<void> {
     if (!this.currentToken) return;
-    if (this.lastReportedSurface === this.activeSurface) return;
     const surface = this.activeSurface;
+    const failure = this.lastApplyFailure;
+    // Report when EITHER the surface or the failure changed - so a request that failed and left this
+    // device on the status bar it was already on still tells the dashboard why, instead of silence.
+    if (this.lastReportedSurface === surface && this.lastReportedFailure === failure) return;
     try {
-      await this.account.reportSurfaceApplied(this.currentToken, surface);
+      await this.account.reportSurfaceApplied(this.currentToken, surface, failure);
       this.lastReportedSurface = surface;
+      this.lastReportedFailure = failure;
     } catch {
-      // Swallow - lastReportedSurface stays whatever it was, so the next cycle retries.
+      // Swallow - the reported state stays put, so the next cycle retries.
     }
   }
 
@@ -1523,7 +1670,7 @@ export class Orchestrator {
     // (activeSurface), so the panel shows the real exclusivity — status bar, or one webview spot.
     const tl = this.webviewSurfaceCard('thinking-line');
     const cb = this.webviewSurfaceCard('chat-banner');
-    return {
+    const ps: PanelState = {
       version: this.context.extension.packageJSON.version as string,
       // What this editor calls itself. Cursor, Windsurf and VS Codium all run this, and the panel
       // used to tell every one of them their formats live in "Visual Studio Code".
@@ -1545,6 +1692,7 @@ export class Orchestrator {
       pauseRestoreFailed: this.pauseRestoreFailed,
       showEarningsInStatusBar: this.showEarningsInStatusBar,
       remoteControlAllowed: this.remoteControlAllowed,
+      remoteSurfacePref: this.remoteSurfacePref,
       activeAdLine: this.activeAdLine,
       activeAdUnpaid: this.activeAdUnpaid,
       activeAdUrl: this.activeAdUrl,
@@ -1574,7 +1722,15 @@ export class Orchestrator {
       terminalConsentGranted: this.consent.isGranted('terminal'),
       terminalBlockedReason: this.hasCliAgent() ? undefined : 'no-agent-cli',
       terminalEarnRate: this.relativeRate('terminal'),
+      onboardingDismissed: this.context.globalState.get<boolean>(ONBOARDING_DISMISSED_KEY) === true,
+      justUpdated: this.justUpdated,
+      // Filled below - pickBestUpgrade reads the surfaces we just built, so it runs on the finished object.
+      bestUpgrade: undefined,
     };
+    // The stepper's "turn on a format" target: the same honest best-format pick the first-run open and
+    // the discoverability nudge use, so all three agree by construction.
+    ps.bestUpgrade = pickBestUpgrade(ps);
+    return ps;
   }
 
   /**
@@ -1702,6 +1858,19 @@ export class Orchestrator {
       case 'toggle-remote-control':
         void this.toggleRemoteControl();
         break;
+      case 'dismiss-onboarding':
+        // Device-local + persisted: the stepper never returns on this machine. The format cards and the
+        // sync toggle stay the way to finish those steps later, so nothing is lost by dismissing.
+        void this.context.globalState.update(ONBOARDING_DISMISSED_KEY, true);
+        this.syncPanel();
+        break;
+      case 'whats-new':
+        void vscode.env.openExternal(vscode.Uri.parse(LINKS.changelog));
+        this.markVersionSeen();
+        break;
+      case 'dismiss-whats-new':
+        this.markVersionSeen();
+        break;
       case 'consent-grant':
         if (isWebviewSurface(msg.id)) {
           void this.enableWebviewSurface(msg.id, msg.takeover === true);
@@ -1817,6 +1986,7 @@ export class Orchestrator {
     const res = this.patch.apply(takeover);
     this.reportPatchOutcome(res.ok);
     if (res.ok) {
+      this.lastApplyFailure = null; // a successful apply clears any prior failure this device reported
       await this.chooseWebviewSurface(id);
       if (res.reloadNeeded) {
         this.applyState('reload-to-earn');
@@ -1835,7 +2005,9 @@ export class Orchestrator {
       return;
     }
 
-    // Fail-safe: explain, stay in status-bar mode.
+    // Fail-safe: explain, stay in status-bar mode. Record the coarse reason so the dashboard can show
+    // WHY this editor did not switch, instead of an indefinite "confirm in your editor".
+    this.lastApplyFailure = mapApplyFailure(res.reason);
     switch (res.reason) {
       case 'blocked':
         vscode.window.showWarningMessage(
@@ -2200,8 +2372,17 @@ export class Orchestrator {
       );
       if (pick === 'Reload window') await vscode.commands.executeCommand('workbench.action.reloadWindow');
     } else if (r.ok && r.assessed) {
-      // We looked at every target and none carries our patch: a verified clean bill.
-      vscode.window.showInformationMessage('Awaitful: nothing to restore - no Awaitful changes are present.');
+      // We looked at every target. If something OTHER than Awaitful is now holding a file we patch (our
+      // marker is gone, but it is not pristine either), say so honestly rather than imply the editor is
+      // untouched: "no Awaitful changes" is true, "nothing changed" is not. Only give the verified clean
+      // bill when nothing foreign is in there.
+      if (r.foreignHeld.length > 0) {
+        vscode.window.showWarningMessage(
+          'Awaitful: your Claude Code files were changed by another extension, not Awaitful, so there is nothing of ours to undo. Restore from that extension - the file path is in the panel.',
+        );
+      } else {
+        vscode.window.showInformationMessage('Awaitful: nothing to restore - no Awaitful changes are present.');
+      }
     } else if (r.ok) {
       // ok but NOT assessed: no recipe resolved for this build, so we could not actually check. Do not
       // claim the editor is clean on a check that never ran - a competitor may have patched over us.
@@ -2220,6 +2401,7 @@ export class Orchestrator {
    * silently re-apply on the next activation). Earning continues immediately in the status bar.
    */
   private async switchToStatusBar(): Promise<void> {
+    this.lastApplyFailure = null; // the status bar is a deliberate destination, never a failure
     const a = this.patch.assess();
     const patched = a.state === 'our-patch-present' || a.state === 'our-patch-stale';
     if (this.activeSurface === 'status-bar' && !patched) {
@@ -2305,6 +2487,7 @@ export class Orchestrator {
       this.buildPanelState(),
     );
     if (view) panel.navigate(view, detailId);
+    else this.noteWhatsNewShown(); // main view = the banner is on screen; let it retire after this session
     void this.refreshAccount();
     // Opening the panel is exactly the moment the developer wants a current answer about what is
     // installed, and the cheapest place to pay for one.
@@ -2350,7 +2533,10 @@ export class Orchestrator {
     } catch { /* non-fatal */ }
     this.applyState(this.activeState());
     this.syncPanel();
-    void this.refreshAccount(true);
+    // Offer the best format this machine can use, once per sign-in, after the account + capability are
+    // known. Fire-and-forget: a first-run flourish must never delay or fail the sign-in it rides on.
+    this.onboardingOpenPending = true;
+    void this.refreshAccount(true).then(() => this.maybeOpenOnboarding()).catch(() => undefined);
   }
 
   async signOut(): Promise<void> {

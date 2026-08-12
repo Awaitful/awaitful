@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getSpinner, frameAt, type StatusBarState, type AdSpinner } from '@awaitful/shared';
+import { reduceMotion } from '../lib/config.js';
 
 export class StatusBarUI {
   private readonly item: vscode.StatusBarItem;
@@ -107,8 +108,11 @@ export class StatusBarUI {
     this.item.command = hasUrl ? 'awaitful.visitAd' : 'awaitful.menu';
 
     const spinner = this.spinnerFor();
-    if (spinner.frames.length === 0) {
-      // Spinner "none": the static dot stays, so a sponsored line is still visibly marked.
+    // Spinner "none", or a developer who asked for less motion. Both land on the same static dot, so
+    // the line stays visibly marked as sponsored either way - reduced motion removes the animation,
+    // never the disclosure. This is the one surface with no CSS to carry a media query, so the check
+    // has to happen here, before the timer starts rather than inside it.
+    if (spinner.frames.length === 0 || reduceMotion()) {
       this.item.text = `$(circle-filled)${line}`;
       return;
     }

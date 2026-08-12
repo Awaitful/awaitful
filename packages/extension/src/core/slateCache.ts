@@ -73,6 +73,10 @@ export class SlateCache {
     return this.slate?.prefsVersion;
   }
 
+  get settingsVersion(): number | undefined {
+    return this.slate?.settingsVersion;
+  }
+
   dispose(): void {
     this.stopPolling();
   }

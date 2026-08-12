@@ -53,11 +53,13 @@ describe('saveToken / token', () => {
 });
 
 describe('signOut', () => {
-  it('clears both token and deviceId', async () => {
-    await link.ensureDeviceId();
+  it('clears the token but KEEPS the deviceId, so re-sign-in is the same machine', async () => {
+    const id = await link.ensureDeviceId();
     await link.saveToken('tok-abc123');
     await link.signOut();
     expect(await link.token()).toBeUndefined();
-    expect(await link.deviceId()).toBeUndefined();
+    // The deviceId is this machine's stable identity - keeping it is what lets the server recognise a
+    // re-link as the same connected machine instead of creating a new one.
+    expect(await link.deviceId()).toBe(id);
   });
 });

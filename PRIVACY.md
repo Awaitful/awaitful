@@ -60,6 +60,12 @@ A batch of `{ deviceId, events[] }`. Each event carries **only**:
 That is the complete list. "How long a sponsored line was on screen" is the *most* specific
 thing Awaitful learns about your session.
 
+The batch's `deviceId` is a random UUID this machine makes up for itself. It is never a hostname,
+MAC address or serial number, so it says nothing about your hardware. It now stays on this machine
+across sign-out, so signing in again is recognized as the same machine instead of adding a new entry
+to your device list. Nothing new leaves your machine as a result: it is the same id already sent
+here, only used to group your own sessions.
+
 ### 3. Check the killswitch - `GET /v1/killswitch`
 No body. Returns whether ads are paused fleet-wide.
 
@@ -87,11 +93,14 @@ So the panel can show whose account is earning and how much. A device token can 
 two routes and nothing else - it can never move money, change campaigns, or enumerate devices.
 
 ### 6. Report an applied surface - `POST /v1/me/surface-applied`
-If you set a preferred surface from the web dashboard, this is how a linked device confirms it
-actually applied that surface on your machine - one field, `surface` (e.g. `thinking-line`),
-nothing else. It carries no content and cannot change anything about your account beyond that one
-fact; it exists so the dashboard can tell "applied, waiting for the first ad to confirm it" apart
-from "nothing has happened on any device yet".
+If you set a preferred surface from the web dashboard, this is how a linked device confirms which
+surface it actually ended up on - `surface` (e.g. `thinking-line`) - and, when a requested surface
+could not be applied here, a coarse `failure` reason drawn from a fixed list: `unsupported-build`,
+`foreign-conflict`, `health-check-failed`, `settings-read-only`, or `error`. That reason is one of
+those labels and nothing else - never a path, a filename, or the name of another tool. It exists so
+the dashboard can show WHY a format did not switch on (instead of an endless "confirm in your
+editor"), and so it can tell "applied, waiting for the first ad to confirm it" apart from "nothing
+has happened on any device yet". It carries no content and cannot change anything about your account.
 
 ### 7. Report the terminal status line - `POST /v1/me/terminal-applied`
 The same thing as above, for the terminal line, which is additive rather than one of the surfaces.
@@ -99,6 +108,12 @@ One field, `enabled` (`true` or `false`), nothing else. Both outcomes are report
 turns the line off is confirming just as much as one that turns it on. Asking for it from the
 dashboard never applies it on its own - turning it on changes `~/.claude/settings.json`, so your
 editor asks you there first, and this is only how it tells the dashboard what actually happened.
+
+The same reporting covers the **Sync across devices** switch in that panel: turning it on or off sends
+one boolean, `enabled`, to `POST /v1/me/auto-apply`, so your dashboard can show which editors will apply
+a format set on another device on their own. It is reported UP from the device only - the web can never
+turn it on for you, because only the machine may authorize modifying Claude Code on it. No content leaves
+either way.
 
 ### 8. Sign-in / device link - `POST /v1/auth/link/*`
 The one-time flow that ties this device to your account. Exchanges a link code for a device

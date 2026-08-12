@@ -15,8 +15,8 @@ export interface SurfaceCreative {
    * external https logo is blocked. The server inlines the advertiser's logo as a data: URI.
    *
    * Explicitly `| undefined` so `restyle()` can CLEAR it: the developer can turn brand logos off
-   * (`awaitful.adBrandLogo`), and the ad already on screen has to lose its logo without the
-   * impression ending. `JSON.stringify` drops the undefined key, so the shim simply sees no logo.
+   * for this format, and the ad already on screen has to lose its logo without the impression
+   * ending. `JSON.stringify` drops the undefined key, so the shim simply sees no logo.
    */
   iconUrl?: string | undefined;
   /**

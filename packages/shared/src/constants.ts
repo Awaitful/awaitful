@@ -83,6 +83,8 @@ export const LINKS = {
   egressTest:
     'https://github.com/Awaitful/awaitful/blob/HEAD/packages/shared/src/__tests__/egress.test.ts',
   issues: 'https://github.com/Awaitful/awaitful/issues',
+  /** User-facing release notes, opened from the post-update "what's new" banner in the panel. */
+  changelog: 'https://github.com/Awaitful/awaitful/blob/HEAD/packages/extension/CHANGELOG.md',
 
   vscodeMarketplace: 'https://marketplace.visualstudio.com/items?itemName=awaitful.awaitful',
   openVsx: 'https://open-vsx.org/extension/awaitful/awaitful',

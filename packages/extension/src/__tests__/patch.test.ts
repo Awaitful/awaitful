@@ -454,6 +454,24 @@ describe('apply', () => {
     expect(readFile(webFile)).toBe(moddedWeb); // untouched
   });
 
+  it('DECLINES the write when the only hash-matching pristine is itself contaminated (save() refuses)', () => {
+    // The last-resort guard (golden rule 2). A recipe self-derived from contamination: its pristineSha256
+    // is the hash of bytes that carry a competitor marker. A sibling copy of exactly those bytes
+    // hash-matches and is offered as "pristine", but BackupStore.save refuses to bank a non-pristine
+    // original - so applyAll must DECLINE the write instead of stacking our shim on top with no backup.
+    const dirtyWeb = `${WEB}/* VIBE-ADS-START */x();/* VIBE-ADS-END */\n`;
+    const contaminated: PatchRecipe = { ...RECIPE, targets: [{ ...WEB_TARGET, pristineSha256: sha256(dirtyWeb) }] };
+    const moddedWeb = WEB + '\n/* OTHER */\n';
+    fs.writeFileSync(webFile, moddedWeb, 'utf8');                 // current file: modified, not pristine
+    fs.writeFileSync(webFile + '.other-backup', dirtyWeb, 'utf8'); // hash-matches the contaminated pristine
+    fs.writeFileSync(extFile, EXT, 'utf8');
+    const res = engine(() => contaminated).apply(true);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe('no-pristine');
+    expect(readFile(webFile)).toBe(moddedWeb); // our shim was never stacked on the contaminated bytes
+    expect(new BackupStore(storageDir).read(BUILD_ID, sha256(dirtyWeb))).toBeUndefined(); // nothing banked
+  });
+
   it('assess reports recoverable=true when a hash-verified pristine copy is on disk', () => {
     fs.writeFileSync(webFile, WEB + '\n/* OTHER */\n', 'utf8');
     fs.writeFileSync(webFile + '.other-backup', WEB, 'utf8');

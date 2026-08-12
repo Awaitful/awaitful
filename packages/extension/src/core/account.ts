@@ -1,4 +1,4 @@
-import type { UserMe, EarningsSummary, RemoteSurfaceId } from '@awaitful/shared';
+import type { UserMe, EarningsSummary, RemoteSurfaceId, SurfaceApplyFailure } from '@awaitful/shared';
 import { getJson, postJson } from '../lib/http.js';
 
 /**
@@ -18,8 +18,10 @@ export class AccountClient {
     return getJson<EarningsSummary>(`${this.apiUrl}/v1/earnings/summary`, token);
   }
 
-  reportSurfaceApplied(token: string, surface: RemoteSurfaceId): Promise<void> {
-    return postJson<void>(`${this.apiUrl}/v1/me/surface-applied`, { surface }, token);
+  /** `surface` is the one this device ENDED on (the fail-safe status bar when a requested surface could
+   *  not be applied); `failure` is the coarse reason it could not, or null on success. */
+  reportSurfaceApplied(token: string, surface: RemoteSurfaceId, failure: SurfaceApplyFailure | null): Promise<void> {
+    return postJson<void>(`${this.apiUrl}/v1/me/surface-applied`, { surface, failure }, token);
   }
 
   /** The terminal is additive, so it reports its own on/off rather than being one of the surfaces.
@@ -27,5 +29,11 @@ export class AccountClient {
    *  turns it on, and without that the web would keep showing a stale "on". */
   reportTerminalApplied(token: string, enabled: boolean): Promise<void> {
     return postJson<void>(`${this.apiUrl}/v1/me/terminal-applied`, { enabled }, token);
+  }
+
+  /** Report this device's own "Control from web" opt-in, so the dashboard can show which editors will
+   *  apply a web-set format on their own. Device-token write; the web never sets this. */
+  reportControlAllowed(token: string, enabled: boolean): Promise<void> {
+    return postJson<void>(`${this.apiUrl}/v1/me/auto-apply`, { enabled }, token);
   }
 }

@@ -10,6 +10,7 @@ import {
   DeviceLinkPollQuerySchema,
   SurfaceAppliedRequestSchema,
   TerminalAppliedRequestSchema,
+  AutoApplyReportSchema,
 } from '../schemas.js';
 
 /**
@@ -28,6 +29,7 @@ import {
  *   POST /v1/patch/report     — PatchReportRequestSchema
  *   POST /v1/me/surface-applied — SurfaceAppliedRequestSchema
  *   POST /v1/me/terminal-applied — TerminalAppliedRequestSchema
+ *   POST /v1/me/auto-apply    — AutoApplyReportSchema
  *   POST /v1/auth/link/start  — DeviceLinkStartRequestSchema
  *   GET  /v1/auth/link/poll   — DeviceLinkPollQuerySchema
  * The remaining calls — GET /v1/killswitch, /v1/me, /v1/earnings/summary — are parameterless: no
@@ -85,14 +87,27 @@ describe('egress whitelist — what leaves the machine', () => {
     ]);
   });
 
-  it('POST /v1/me/surface-applied carries only which surface a device applied — no content', () => {
-    expect(keysOf(SurfaceAppliedRequestSchema)).toEqual(['surface']);
+  it('POST /v1/me/surface-applied carries only which surface a device ended on + a coarse failure reason', () => {
+    // `surface` is one of the fixed RemoteSurfaceIds; `failure` is a CLOSED, coarse enum (no path,
+    // filename, or vendor detail), so neither field can carry user content.
+    expect(keysOf(SurfaceAppliedRequestSchema)).toEqual(['failure', 'surface']);
+    // The failure reason is a bounded whitelist, never a free-form string that could smuggle content…
+    expect(() => SurfaceAppliedRequestSchema.parse({ surface: 'chat-banner', failure: 'unsupported-build' })).not.toThrow();
+    expect(() => SurfaceAppliedRequestSchema.parse({ surface: 'chat-banner', failure: '/Users/me/secret/path' })).toThrow();
+    // …and it is optional/nullable, so an older client that omits it still reads as a plain success.
+    expect(() => SurfaceAppliedRequestSchema.parse({ surface: 'chat-banner' })).not.toThrow();
   });
 
   it('POST /v1/me/terminal-applied carries only whether the line is on — no content', () => {
     // One boolean about this device's own state. Same narrow write a device token already had for
     // the surface it applied, and the same reason it exists: the request is not the outcome.
     expect(keysOf(TerminalAppliedRequestSchema)).toEqual(['enabled']);
+  });
+
+  it('POST /v1/me/auto-apply carries only this device\'s own Control-from-web opt-in — no content', () => {
+    // One boolean about this device's own consent state, reported up so the dashboard can show it.
+    // The web can never SET it; a device only ever tells the server a fact about itself.
+    expect(keysOf(AutoApplyReportSchema)).toEqual(['enabled']);
   });
 
   it('POST /v1/auth/link/start carries only a random state nonce — no account, no content', () => {

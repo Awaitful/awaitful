@@ -7,7 +7,8 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./wireframe": "./dist/wireframe.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

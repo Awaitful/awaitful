@@ -17,7 +17,7 @@ import { LINKS, SOCIAL } from '../constants.js';
  * A dead receipt is worse than no receipt. It turns a sceptic into someone who has caught us.
  */
 describe('public links', () => {
-  const deepLinks = [LINKS.egressManifest, LINKS.egressTest];
+  const deepLinks = [LINKS.egressManifest, LINKS.egressTest, LINKS.changelog];
 
   it('points at the public client mirror, never the private monorepo', () => {
     for (const url of Object.values<string>(LINKS)) {

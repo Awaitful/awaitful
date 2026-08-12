@@ -327,7 +327,15 @@ export class PatchEngine {
           const rb = this.restore();
           return { ok: false, reason: 'no-pristine', rolledBack: rb.ok };
         }
-        this.backups.save(target.buildId, t.pristineSha256, pristine);
+        // save() is the last-resort pristine check: it REFUSES (returns false) when the bytes we are
+        // about to bank as "original" actually carry a patch marker - a competitor's or our own - which
+        // means they are not pristine. Its contract is that a refusal must be treated as no-pristine and
+        // the write declined, so we never modify Claude Code without a verified backup on disk (golden
+        // rule 2). Roll back anything already written this pass and fail safe.
+        if (!this.backups.save(target.buildId, t.pristineSha256, pristine)) {
+          const rb = this.restore();
+          return { ok: false, reason: 'no-pristine', rolledBack: rb.ok };
+        }
         atomicWrite(abs, applyToContent(pristine.toString('utf8'), t));
         changed = true;
       }

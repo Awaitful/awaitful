@@ -102,6 +102,8 @@ const STATE: PanelState = {
     { id: 'thinking-line', active: false, available: true, consentGranted: false, modifiesFiles: true, earnRate: 2, supported: true },
   ],
   terminalEnabled: true, terminalConsentGranted: true, terminalEarnRate: 1.5,
+  // Dismissed by default so the base fixture is the steady-state panel; the stepper tests opt back in.
+  onboardingDismissed: true, bestUpgrade: 'chat-banner', justUpdated: false, remoteSurfacePref: null,
 };
 
 const SCRIPT = /<script nonce="[^"]*">([\s\S]*?)<\/script>/.exec(buildHtml(STATE))![1]!;
@@ -121,6 +123,10 @@ function mount(state: PanelState = STATE) {
     createElement: (t: string) => new El(t),
     createTextNode: (t: string) => new TextNode(t),
     getElementById: (id: string) => registry[id] ?? null,
+    // updateHighlight() aims the illustration through this. Nothing calls it during a mount today
+    // (only the hover listeners do, and addEventListener here is a no-op), but leaving it off would
+    // turn any future mount-time call into a confusing "not a function" rather than a real failure.
+    querySelectorAll: (sel: string) => root.querySelectorAll(sel),
     head: new El('head'),
   };
   (globalThis as Record<string, unknown>)['requestAnimationFrame'] = () => 0;
@@ -190,6 +196,131 @@ describe('the panel renders', () => {
       'Status bar, active, base earning rate',
       'Terminal status line, active, about 1.5 times the base rate',
     ]);
+  });
+});
+
+/**
+ * The onboarding stepper. Its whole point is that every step's state is DERIVED - so these mount real
+ * states and assert the stepper reads them, and that each button reuses an existing message rather than
+ * a new activation path. The ✕ appears only after sign-in; dismissing is device-local.
+ */
+describe('the onboarding stepper', () => {
+  const stepperOf = () => root.querySelectorAll('stepper')[0];
+
+  it('is the sign-in surface when signed out: step one, no dismiss', () => {
+    mount({ ...STATE, signedIn: false, terminalEnabled: false, remoteControlAllowed: false, onboardingDismissed: false });
+    const box = stepperOf();
+    expect(box, 'no stepper when signed out').toBeTruthy();
+    expect(root.querySelectorAll('stepper-x'), 'no ✕ before sign-in').toHaveLength(0);
+    const btn = box!.querySelectorAll('btn-primary')[0]!;
+    expect(btn.textContent).toBe('Sign in');
+    posted = [];
+    btn.onclick!();
+    expect(posted).toEqual([{ type: 'sign-in' }]);
+  });
+
+  it('offers the best format as the current step, through the existing consent message', () => {
+    mount({
+      ...STATE, onboardingDismissed: false, terminalEnabled: false, remoteControlAllowed: false,
+      bestUpgrade: 'chat-banner',
+      vsSurfaces: STATE.vsSurfaces.map((s) => ({ ...s, active: s.id === 'status-bar' })),
+    });
+    const box = stepperOf()!;
+    expect(box.querySelectorAll('stepper-x'), '✕ appears once signed in').toHaveLength(1);
+    const btn = box.querySelectorAll('btn-primary')[0]!;
+    expect(btn.textContent).toBe('Turn on chat banner');
+    posted = [];
+    btn.onclick!();
+    expect(posted).toEqual([{ type: 'consent-grant', id: 'chat-banner' }]);
+  });
+
+  it('turns on sync as the last step, once a format is already on', () => {
+    mount({ ...STATE, onboardingDismissed: false, terminalEnabled: true, remoteControlAllowed: false });
+    const btn = stepperOf()!.querySelectorAll('btn-primary')[0]!;
+    expect(btn.textContent).toBe('Turn on sync');
+    posted = [];
+    btn.onclick!();
+    expect(posted).toEqual([{ type: 'toggle-remote-control' }]);
+  });
+
+  it('dismisses with the ✕', () => {
+    mount({ ...STATE, onboardingDismissed: false, remoteControlAllowed: false });
+    posted = [];
+    stepperOf()!.querySelectorAll('stepper-x')[0]!.onclick!();
+    expect(posted).toEqual([{ type: 'dismiss-onboarding' }]);
+  });
+
+  it('is gone once dismissed, and once every step is done', () => {
+    mount({ ...STATE, onboardingDismissed: true });
+    expect(root.querySelectorAll('stepper')).toHaveLength(0);
+    mount({ ...STATE, onboardingDismissed: false, terminalEnabled: true, remoteControlAllowed: true });
+    expect(root.querySelectorAll('stepper'), 'nothing left to do').toHaveLength(0);
+  });
+
+  // Regression: a status-bar dashboard choice reverted the device and the stepper kept nagging to turn
+  // the chat banner back on - fighting the very choice it should respect.
+  it('treats a deliberate web format choice as settled, even status-bar', () => {
+    mount({
+      ...STATE, onboardingDismissed: false, remoteSurfacePref: 'status-bar',
+      remoteControlAllowed: true, terminalEnabled: false,
+      vsSurfaces: STATE.vsSurfaces.map((s) => ({ ...s, active: s.id === 'status-bar' })),
+    });
+    // Signed in + a dashboard format choice + sync on = nothing left to do, so no stepper and no nag.
+    expect(root.querySelectorAll('stepper')).toHaveLength(0);
+  });
+
+  it('with a web format choice but sync off, only sync remains - never a format nag', () => {
+    mount({
+      ...STATE, onboardingDismissed: false, remoteSurfacePref: 'status-bar',
+      remoteControlAllowed: false, terminalEnabled: false,
+      vsSurfaces: STATE.vsSurfaces.map((s) => ({ ...s, active: s.id === 'status-bar' })),
+    });
+    const btn = stepperOf()!.querySelectorAll('btn-primary')[0]!;
+    expect(btn.textContent).toBe('Turn on sync');
+  });
+
+  it('points a contested webview at resolving the conflict, never the terminal', () => {
+    // A competitor holds Claude Code's webview during onboarding: bestUpgrade is undefined (status-bar
+    // fallback) and step 2 offers to resolve the conflict, not "Turn on terminal".
+    mount({
+      ...STATE, onboardingDismissed: false, terminalEnabled: false, remoteControlAllowed: false,
+      remoteSurfacePref: null, bestUpgrade: undefined,
+      vsSurfaces: STATE.vsSurfaces.map((s) =>
+        s.id === 'status-bar' ? { ...s, active: true } : { ...s, active: false, available: true, conflict: true }),
+    });
+    const btn = stepperOf()!.querySelectorAll('btn-primary')[0]!;
+    expect(btn.textContent).toBe('Resolve the conflict');
+  });
+
+  it('says sync, never the old "control from web"', () => {
+    mount();
+    expect(pageText()).toContain('Sync across devices');
+    expect(pageText()).not.toContain('Control from web');
+  });
+});
+
+/** The one-time post-update banner: absent in steady state, present after an update, both actions clear it. */
+describe("the what's-new banner", () => {
+  it('does not show unless the version changed', () => {
+    mount();
+    expect(root.querySelectorAll('whatsnew')).toHaveLength(0);
+  });
+
+  it('appears after an update; "see what s new" opens the notes and marks seen', () => {
+    mount({ ...STATE, justUpdated: true });
+    const bar = root.querySelectorAll('whatsnew')[0];
+    expect(bar, 'no banner after an update').toBeTruthy();
+    expect(pageText()).toContain('Updated to v');
+    posted = [];
+    bar!.querySelectorAll('whatsnew-cta')[0]!.onclick!();
+    expect(posted).toEqual([{ type: 'whats-new' }]);
+  });
+
+  it('dismisses with the ✕, marking seen without opening anything', () => {
+    mount({ ...STATE, justUpdated: true });
+    posted = [];
+    root.querySelectorAll('whatsnew-x')[0]!.onclick!();
+    expect(posted).toEqual([{ type: 'dismiss-whats-new' }]);
   });
 });
 

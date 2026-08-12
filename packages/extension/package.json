@@ -2,7 +2,7 @@
   "name": "awaitful",
   "displayName": "Awaitful - Earn while your AI thinks",
   "description": "Earn while your AI agent thinks. A single sponsored line during thinking time, with revenue shared to you.",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "publisher": "awaitful",
   "author": {
     "name": "Awaitful LLC",
@@ -102,31 +102,6 @@
           "type": "string",
           "description": "Awaitful server URL. Leave blank to use the default. Override for local development, e.g. http://localhost:3000.",
           "default": ""
-        },
-        "awaitful.adSpinner": {
-          "type": "string",
-          "enum": [
-            "claude",
-            "dots",
-            "line",
-            "circle-halves",
-            "square-quarters",
-            "triangle",
-            "arrows",
-            "pulse",
-            "star",
-            "toggle",
-            "none"
-          ],
-          "default": "claude",
-          "markdownDescription": "The animation shown before the sponsored line while your agent thinks. [Open the Awaitful panel](command:awaitful.openPanel).",
-          "markdownDeprecationMessage": "Each ad format now keeps its own spinner. This value still applies to any format you have not chosen one for. Pick per format, with every spinner animating, in [the Awaitful panel](command:awaitful.openPanel)."
-        },
-        "awaitful.adBrandLogo": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Show the advertiser's logo before the sponsored line. Not every ad carries one, and the status bar and terminal draw text only, so turning this on does not add a logo where there is none. The sponsored line itself always shows.",
-          "markdownDeprecationMessage": "Each ad format now keeps its own logo setting. This value still applies to any format you have not chosen one for. Pick per format in [the Awaitful panel](command:awaitful.openPanel)."
         }
       }
     }

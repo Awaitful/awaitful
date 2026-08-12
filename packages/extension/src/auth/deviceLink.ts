@@ -92,9 +92,10 @@ export class DeviceLink {
   }
 
   async signOut(): Promise<void> {
-    await Promise.all([
-      this.secrets.delete(SECRET_TOKEN),
-      this.secrets.delete(SECRET_DEVICE_ID),
-    ]);
+    // Delete only the auth token. The deviceId is this machine's stable, self-generated identity (a
+    // random UUID, never hardware-derived) - it already rides along with anonymous event attribution,
+    // and keeping it across sign-out is what lets a re-sign-in reuse the existing connected machine
+    // instead of creating a new one. Nothing new leaves the machine as a result.
+    await this.secrets.delete(SECRET_TOKEN);
   }
 }

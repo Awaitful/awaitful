@@ -47,6 +47,12 @@ export interface AdSlateResponse {
    * Absent for an anonymous slate (no account to have settings).
    */
   prefsVersion?: number;
+  /**
+   * A separate monotonic version bumped when the SURFACE/TERMINAL preference changes (the file-touching
+   * pushes). Rides the same slate so a device notices a format change within one poll, without touching
+   * the prefsVersion styling ratchet. Absent for an anonymous slate.
+   */
+  settingsVersion?: number;
 }
 
 export interface AdEvent {
@@ -367,6 +373,16 @@ export interface CreateCampaignInput {
   totalBudget?: number;
 }
 
+/** What a site told us about itself, so the advertiser edits instead of retypes. */
+export interface SitePrefillResult {
+  finalUrl: string;
+  line?: string;
+  brandName?: string;
+  /** Already-processed WebP `data:` URI, identical in shape to an uploaded logo. Never a remote URL. */
+  brandIconData?: string;
+  missing: Array<'line' | 'brandName' | 'brandIconData'>;
+}
+
 export interface UpdateCampaignInput {
   line?: string;
   url?: string | null;
@@ -427,6 +443,15 @@ export type UserRole = 'advertiser' | 'developer' | 'admin';
  */
 export type RemoteSurfaceId = 'status-bar' | 'thinking-line' | 'chat-banner';
 
+/** Coarse, privacy-safe reason a web-requested surface could not be applied on a device (mirrors
+ *  SurfaceApplyFailureSchema). No path, filename, or vendor detail ever leaves the machine. */
+export type SurfaceApplyFailure =
+  | 'unsupported-build'
+  | 'foreign-conflict'
+  | 'health-check-failed'
+  | 'settings-read-only'
+  | 'error';
+
 /**
  * Ad-rendering preferences settable from the web dashboard, synced to every linked device
  * automatically - unlike `remoteSurfacePreference`, none of these touch a Claude Code file (no
@@ -440,9 +465,11 @@ export type RemoteSurfaceId = 'status-bar' | 'thinking-line' | 'chat-banner';
  * Per-format customization, stored flat and keyed `${format}.${element}` (see syncedSettings).
  *
  * A loose record rather than an enumerated shape on purpose: the valid pairs are declared once in
- * AD_FORMATS, and a second list here would be one more thing to keep in step. The four legacy
- * account-wide keys (`spinner`, `brandLogo`, `chatBannerStyle`, `chatBannerFrame`) may still be
- * present on older rows; they are read as a seed and never written back.
+ * AD_FORMATS, and a second list here would be one more thing to keep in step.
+ *
+ * An older row may still carry four account-wide keys (`spinner`, `brandLogo`, `chatBannerStyle`,
+ * `chatBannerFrame`) from before customization was per-format. Nothing reads them: they are inert
+ * data, ignored by the same rule that ignores any other unrecognised key.
  */
 export type AdPreferences = Record<string, string | boolean>;
 
@@ -500,6 +527,23 @@ export interface DeviceInfo {
   id: string;
   createdAt: string;
   lastSeenAt: string | null;
+  /** A name the account owner typed for this machine, from the web. `null` = never named, in which
+   *  case the UI falls back to the id tail. Nothing about this is read off the device. */
+  label: string | null;
+  /** The surface this device last CONFIRMED it ended up on (its own report), so the dashboard can show
+   *  a true per-machine state instead of one account-wide value. `null` = never reported. */
+  appliedSurface: RemoteSurfaceId | null;
+  /** Whether the terminal status line is on for this device (its own report). `null` = never reported. */
+  appliedTerminal: boolean | null;
+  /** Coarse reason the web-requested surface could not be applied here; `null` = the last apply
+   *  succeeded, or none was attempted. Lets the dashboard show WHY, not an indefinite "confirm in your
+   *  editor". */
+  applyFailure: SurfaceApplyFailure | null;
+  /** When this device last reported its apply-state (ISO), or `null` if never. */
+  appliedAt: string | null;
+  /** This device's own "Control from web" opt-in (reported up, never web-set): true = a web-set format
+   *  applies here without a local confirm. Lets the dashboard show which editors will honor a push. */
+  autoApply: boolean;
 }
 
 export interface AdminCampaignItem extends CampaignWithCreative {
