@@ -131,11 +131,15 @@ export interface PlacementContext {
   report(event: Pick<AdEvent, 'type' | 'adId' | 'slateId' | 'visibleMs'>): void;
 }
 
-export type SSEEventType = 'slate_refresh' | 'killswitch' | 'recipe_update' | 'impression_stats' | 'market_event';
+export type SSEEventType = 'slate_refresh' | 'killswitch' | 'recipe_update' | 'impression_stats' | 'market_event' | 'settings_changed';
 
 export interface SSEEvent {
   type: SSEEventType;
   payload?: unknown;
+  /** When set, the hub delivers this event ONLY to connected clients authenticated as this account, so a
+   *  per-account signal (e.g. `settings_changed`, which tells that account's dashboard to refetch) never
+   *  reaches another account's browser. Absent = a global event delivered to every client. */
+  accountId?: string;
 }
 
 // ── Recipe delivery (patch mode) ────────────────────────────────────────────────
@@ -429,6 +433,50 @@ export interface PayoutOption {
   feeBearer: 'platform' | 'developer';
   feeDescription: string;
   isConnected: boolean;
+}
+
+/**
+ * What one corridor costs the platform to pay: the fees absorbed, against the gross that reached
+ * developers through it. Per rail AND country, because those differ sharply - the same Wise rail is far
+ * cheaper per dollar to India than to Brazil, and a flat total hides that.
+ *
+ * `effectivePct` is the number to act on: it is dominated by the FIXED part of each fee, so it falls as
+ * withdrawals get larger. A corridor sitting high is a corridor whose withdrawal floor is too low.
+ */
+export interface PayoutCostByCorridor {
+  provider: string;
+  /** ISO-2, or null on rows written before the country was snapshotted. */
+  payeeCountry: string | null;
+  /** Payouts that were not reversed. */
+  payouts: number;
+  /** Gross that reached developers through this corridor. */
+  grossUsd: string;
+  /** What the platform absorbed in fees for them. Positive - a cost. */
+  feesUsd: string;
+  /** feesUsd / grossUsd, as a percentage. Null when nothing has been paid through this corridor yet. */
+  effectivePct: number | null;
+}
+
+/**
+ * What a payout is really worth in the developer's own currency, live-quoted from the rail (FINANCE.md
+ * §4.4 step 4: "surface the net-in-local vs USD-accrued figure so a developer is never surprised by what
+ * lands in their bank").
+ *
+ * Only meaningful for a converting rail. On a corridor with a wide spread - Brazil far more than India - a
+ * USD-only figure misrepresents what arrives, so this is quoted rather than estimated. Nullable end to end:
+ * when the rail cannot quote, the UI says nothing rather than showing a number it cannot stand behind.
+ */
+export interface PayoutLocalQuote {
+  /** ISO-4217 of the currency the money lands in (e.g. 'BRL'). */
+  localCurrency: string;
+  /** What the developer receives in that currency, after the rail's fee. */
+  localAmount: string;
+  /** The rate used, for the "about" line. */
+  fxRate: string;
+  /** When the rate was quoted - rates move, so a stale figure must be recognisable as one. */
+  fxAsOf: string;
+  /** The USD gross this was quoted against, so the client can discard a quote for a stale amount. */
+  grossUsd: string;
 }
 
 // ── Admin ──────────────────────────────────────────────────────────────────────
@@ -743,8 +791,15 @@ export interface FinanceFigures {
   // month of real cash would silently look more profitable than it is.
   /** SUM(platform_fee): the margin actually taken on real advertiser spend. */
   grossMarginUsd: number;
-  /** SUM(processing_fee): the pay-in fee we swallowed so the advertiser's wallet credits in full. Negative. */
+  /** The PAY-IN fee we swallowed so the advertiser's wallet credits in full (refType='checkout'). Negative.
+   *  Scoped to pay-in on purpose: payout fees book to the same `kind` and used to be folded in here, which
+   *  made a growing payout cost invisible behind a label that says "so an advertiser's wallet credits in
+   *  full". They are `payoutFeesUsd` below. */
   processingFeesUsd: number;
+  /** The transfer cost absorbed so a DEVELOPER receives their full gross, net of reversals (refType='payout').
+   *  Negative. Every rail is platform-borne, so this is the real price of paying people - and the number
+   *  that decides whether a corridor's withdrawal floor is set right. */
+  payoutFeesUsd: number;
   /** What is left. EXCLUDES the phase-7A opening balance, which sits on the same account and is an
    *  accounting artifact, not income. */
   netRevenueUsd: number;

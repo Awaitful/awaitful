@@ -4,6 +4,7 @@ export * from './schemas.js';
 export * from './notifications.js';
 export * from './adCustomization.js';
 export * from './syncedSettings.js';
+export * from './payoutCorridors.js';
 
 /*
  * `./wireframe.js` is deliberately NOT re-exported here. Import it as

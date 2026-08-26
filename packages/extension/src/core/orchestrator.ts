@@ -77,6 +77,18 @@ const WEBVIEW_SURFACE_KEY = 'awaitful.webviewSurface';
  * simply never consulted again, so no migration is needed.
  */
 const REMOTE_SURFACE_PROMPTED_KEY = 'awaitful.remoteSurfacePromptedFor';
+/** Revision of the sync nudge's ASK, stored alongside the format so a materially different question
+ *  gets asked once even on a machine that dismissed the previous one. See where it is read. */
+const SYNC_NUDGE_REV = 2;
+/**
+ * The format a "Restore original files" just undid, while the account is still asking for it.
+ *
+ * Restore is the escape hatch the extension itself prescribes when a patch goes wrong, so it has to
+ * outrank a standing dashboard request. Without this, a synced device re-applied the very format the
+ * developer had just removed on the next check-in - and, since 0.7.6 silences the sync path, with no
+ * message at all. The one remedy for a broken editor quietly re-armed itself.
+ */
+const RESTORED_FROM_KEY = 'awaitful.restoredFrom';
 const TERMINAL_ENABLED_KEY = 'awaitful.terminalEnabled';
 // One-time gate for the "your dashboard asked to turn the terminal on" toast. A single key, not one
 // per value: the request is a boolean, and the only prompting case is turning it ON (off needs no
@@ -159,6 +171,33 @@ const PANEL_VIEWS: ReadonlySet<string> = new Set(['surfaces', 'detail', 'privacy
 function tildify(p: string): string {
   const home = homedir();
   return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+/**
+ * May a dashboard request be applied to this device WITHOUT asking first?
+ *
+ * Two ways to earn a silent apply: this device already consented to that format, or the developer
+ * turned on sync and asked for exactly this. Both are the device's own permission, so golden rule 2
+ * holds either way.
+ *
+ * And one way to lose it, which is the whole reason this is a named function rather than a boolean
+ * in a branch: a restore of that same format. "Restore original files" is the remedy the extension
+ * itself prescribes when a patch goes wrong, so re-applying it unprompted would re-arm precisely
+ * what the developer had just switched off - and since 0.7.6 silences the sync path, it would do so
+ * without a word. The escape hatch outranks the standing request; the developer gets asked instead,
+ * for as long as the dashboard keeps asking for the same thing.
+ *
+ * Exported so the rule can be held still by a test. The orchestrator needs the whole VS Code API to
+ * construct, and an invariant that can only be checked by reading is one that quietly stops holding.
+ */
+export function mayAutoApply(opts: {
+  pref: string;
+  restoredFrom: string | undefined;
+  consentGranted: boolean;
+  syncOn: boolean;
+}): boolean {
+  if (opts.restoredFrom === opts.pref) return false;
+  return opts.consentGranted || opts.syncOn;
 }
 
 /**
@@ -328,6 +367,27 @@ export class Orchestrator {
   private lastReportedFailure: SurfaceApplyFailure | null | undefined = undefined;
   /** Last "Control from web" state reported, so an unchanged one is not re-sent every check-in. */
   private lastReportedControl: boolean | undefined;
+  /**
+   * A format this device chose that the ACCOUNT has not accepted yet.
+   *
+   * The write used to be fire-and-forget with no retry, alone among the reports in this file. Any
+   * failed POST - offline, a 5xx, a server restart mid-deploy, or the server refusing because it does
+   * not believe this device is synced - lost the choice silently, and the very next check-in read the
+   * older account value and applied it back over the developer. Held until a write is confirmed, and
+   * re-sent BEFORE the reconciler runs, so a stale read can never revert an unsent choice.
+   */
+  private pendingSurfaceChoice: RemoteSurfaceId | undefined;
+  /**
+   * (format, reason) pairs already announced on the AUTOMATIC path this session.
+   *
+   * An automatic apply runs on every check-in, so a machine that cannot satisfy the account's choice
+   * - an unverified Claude Code build, a competitor holding the file, a spent reclaim budget - raised
+   * the identical warning every five minutes, indefinitely, about a request the developer never made
+   * on that machine. Said once per distinct reason; the dashboard carries the per-device failure
+   * after that, so this is quieter, not silent. Cleared on a successful apply, so a problem that
+   * comes back after being fixed still speaks.
+   */
+  private autoFailureNotified = new Set<string>();
   private showEarningsInStatusBar = true;
   private remoteControlAllowed = false;
   private lastAccountFetchMs = 0;
@@ -1114,12 +1174,33 @@ export class Orchestrator {
   }
 
   private async toggleTerminal(): Promise<void> {
+    const before = this.terminalEnabled;
     if (this.terminalEnabled) await this.disableTerminal();
     else await this.enableTerminal();
     this.syncPanel();
     // Report at once rather than waiting for the next check-in: the dashboard may be open and
     // watching for exactly this, having asked for it. Best-effort, so a failure just retries later.
     void this.reportAppliedTerminal();
+    /**
+     * ...and, when synced, make it the account's choice rather than only this device's observation.
+     *
+     * The format had a two-way write from 0.7.6; the terminal did not, so the account value could
+     * only ever be written from the web. A developer who had once switched the terminal off on the
+     * dashboard could turn it on here and watch the reconciler switch it back off within five
+     * minutes, every time, because the stale account value was the only one either side could see.
+     *
+     * Only when the state ACTUALLY changed: enableTerminal refuses outright on a machine with no
+     * status-line agent, and reporting a choice that was declined would tell every other device to
+     * follow something that never happened here.
+     */
+    if (this.terminalEnabled !== before) this.reportTerminalChoiceIfSynced(this.terminalEnabled);
+  }
+
+  /** The terminal's counterpart to reportSurfaceChoiceIfSynced. Best-effort: unlike the format, the
+   *  reconciler below no longer disarms an unsynced device, so a lost write cannot revert anything. */
+  private reportTerminalChoiceIfSynced(enabled: boolean): void {
+    if (!this.remoteControlAllowed || !this.currentToken) return;
+    void this.account.reportTerminalChoice(this.currentToken, enabled).catch(() => undefined);
   }
 
   private async enableTerminal(): Promise<void> {
@@ -1274,8 +1355,14 @@ export class Orchestrator {
   }
 
   private async toggleRemoteControl(): Promise<void> {
-    this.remoteControlAllowed = !this.remoteControlAllowed;
-    await this.context.globalState.update(REMOTE_CONTROL_KEY, this.remoteControlAllowed);
+    await this.setRemoteControl(!this.remoteControlAllowed);
+  }
+
+  /** Set this editor's sync (Control from web) opt-in and let the dashboard know. Shared by the panel
+   *  toggle and the reconcile nudge's one-click "Turn on sync". */
+  private async setRemoteControl(enabled: boolean): Promise<void> {
+    this.remoteControlAllowed = enabled;
+    await this.context.globalState.update(REMOTE_CONTROL_KEY, enabled);
     this.syncPanel();
     void this.reportControlAllowed(); // let the dashboard reflect this editor's new opt-in promptly
   }
@@ -1362,6 +1449,10 @@ export class Orchestrator {
       this.accountEmail = me.value.email;
       this.accountName = me.value.name ?? undefined;
       this.remoteSurfacePref = me.value.remoteSurfacePreference;
+      // BEFORE the reconciler, always: `me` was fetched at the top of this method, so if this device
+      // has a choice the account has not accepted yet, that response predates it. Reconciling first
+      // would apply the older value back over the developer and then report it as this device's own.
+      await this.flushSurfaceChoice();
       // Awaited (unlike the rest of this method's fire-and-forget callers) so the report below
       // always reflects activeSurface AFTER reconciliation settles, not mid-flight.
       await this.reconcileRemoteSurfacePreference(me.value.remoteSurfacePreference);
@@ -1486,9 +1577,17 @@ export class Orchestrator {
     // this field omits it entirely, and `undefined === null` is false - so a strict check falls
     // straight through and acts on a request nobody made. See the terminal reconciler below, where
     // exactly that shipped and switched the status line on by itself.
+    // An unsent choice means this response is out of date by construction - it was fetched before the
+    // write landed, or the write has not landed at all. Acting on it reverts the developer.
+    if (this.pendingSurfaceChoice !== undefined) return;
+
     if (pref == null || pref === this.activeSurface) {
       if (this.context.globalState.get<string>(REMOTE_SURFACE_PROMPTED_KEY) !== undefined) {
         await this.context.globalState.update(REMOTE_SURFACE_PROMPTED_KEY, undefined);
+      }
+      // The standing request is satisfied or withdrawn, so the restore it collided with is history.
+      if (this.context.globalState.get<string>(RESTORED_FROM_KEY) !== undefined) {
+        await this.context.globalState.update(RESTORED_FROM_KEY, undefined);
       }
       return;
     }
@@ -1498,22 +1597,57 @@ export class Orchestrator {
       return;
     }
 
-    if (this.consent.isGranted(pref) || this.remoteControlAllowed) {
-      await this.enableWebviewSurface(pref, false);
+    if (mayAutoApply({
+      pref,
+      restoredFrom: this.context.globalState.get<string>(RESTORED_FROM_KEY),
+      consentGranted: this.consent.isGranted(pref),
+      syncOn: this.remoteControlAllowed,
+    })) {
+      await this.enableWebviewSurface(pref, false, true); // auto: apply silently, no modal reload prompt
       return;
     }
 
-    // Prompt once per distinct outstanding request: silence while the same one stands, a fresh
-    // toast the moment the dashboard asks for something else.
-    if (this.context.globalState.get<string>(REMOTE_SURFACE_PROMPTED_KEY) === pref) return;
-    await this.context.globalState.update(REMOTE_SURFACE_PROMPTED_KEY, pref);
+    /**
+     * Prompt once per distinct outstanding request: silence while the same one stands, a fresh toast
+     * the moment the dashboard asks for something else.
+     *
+     * Revisioned, and that is not decoration. The stored value used to be a bare surface id, so a
+     * machine upgrading from 0.7.5 that had already dismissed the OLD single-button toast for the
+     * same format would never see this one - and this one is the only place sync is offered in a
+     * click. The people it exists to convert are exactly the people it would have skipped. Bump
+     * SYNC_NUDGE_REV whenever the toast's ASK changes materially, never for a wording tweak.
+     */
+    const askedFor = `${SYNC_NUDGE_REV}:${pref}`;
+    if (this.context.globalState.get<string>(REMOTE_SURFACE_PROMPTED_KEY) === askedFor) return;
+    await this.context.globalState.update(REMOTE_SURFACE_PROMPTED_KEY, askedFor);
 
+    // The nudge's real job is conversion: a developer who skipped sync at sign-in learns it exists and
+    // turns it on in one click, right here, so this and every future dashboard choice lands on its own
+    // across their editors. The second button applies the format here and leaves sync off. Either
+    // action is this device's own consent to patch, so golden rule 2 holds; dismissing changes nothing.
+    //
+    // It used to read "Just this once", and that was the one thing it did not mean. Applying grants
+    // this device standing consent for that format, so a later dashboard pick of the SAME format
+    // re-applies here with no prompt - a label naming the opposite of what the click does. The label
+    // now says what happens; the standing grant is the honest description of the behaviour, and
+    // narrowing the grant to a genuine one-shot is a separate change with real risk attached.
     const label = surfaceLabel(pref);
     const pick = await vscode.window.showInformationMessage(
-      `Your Awaitful dashboard set the ${label} as your preferred ad format. That changes a Claude Code file on this device, so it needs your OK here first.`,
-      'Open panel',
+      `Your Awaitful dashboard set the ${label} as your ad format. Turn on sync and this editor will apply your dashboard choices on its own from now on. Each machine turns sync on for itself. It updates a Claude Code file, with the same backup and verify as always.`,
+      'Turn on sync',
+      'Apply on this editor',
     );
-    if (pick === 'Open panel') this.openPanel(pref);
+    if (pick === 'Turn on sync' || pick === 'Apply on this editor') {
+      // Either answer is this device asking for the format back, so the restore latch has served its
+      // purpose and must not keep forcing a prompt on every later check-in.
+      await this.context.globalState.update(RESTORED_FROM_KEY, undefined);
+    }
+    if (pick === 'Turn on sync') {
+      await this.setRemoteControl(true);
+      await this.enableWebviewSurface(pref, false, true); // now synced: apply silently, no reload modal
+    } else if (pick === 'Apply on this editor') {
+      await this.enableWebviewSurface(pref, false); // manual apply here; keeps its own reload prompt
+    }
   }
 
   /**
@@ -1544,6 +1678,11 @@ export class Orchestrator {
     if (pref == null || pref === this.terminalEnabled) return;
 
     if (pref === false) {
+      // Symmetric with turning it ON: a device acts on the account's terminal request only when it
+      // has opted in. Turning it off writes nothing dangerous, but it still UNDOES something the
+      // developer did on this machine - and an unsynced machine that never agreed to follow the
+      // dashboard should not have its status line taken away by one.
+      if (!this.consent.isGranted('terminal') && !this.remoteControlAllowed) return;
       await this.disableTerminal();
       this.syncPanel();
       return;
@@ -1606,6 +1745,46 @@ export class Orchestrator {
       this.lastReportedFailure = failure;
     } catch {
       // Swallow - the reported state stays put, so the next cycle retries.
+    }
+  }
+
+  /**
+   * Two-way sync. When the developer deliberately changes the format on THIS device from the panel and
+   * this device is synced (remoteControlAllowed), write the shared account preference right now - before
+   * any window reload - so the change sticks and propagates to their other devices, instead of
+   * reconcileRemoteSurfacePreference reverting it to the web value on the next check-in. Fire-and-forget;
+   * the server accepts it only under this device's own sync opt-in.
+   *
+   * ONLY the panel's user actions call this (consent-grant / set-surface). The reconcile and the fail-safe
+   * fallback change the surface WITHOUT a panel message, so they never call it - an automatic apply can
+   * never hijack the shared choice. Sync off: no account write, the change stays device-local as before.
+   */
+  private reportSurfaceChoiceIfSynced(surface: RemoteSurfaceId): void {
+    if (!this.remoteControlAllowed || !this.currentToken) return;
+    this.pendingSurfaceChoice = surface;
+    void this.flushSurfaceChoice();
+  }
+
+  /**
+   * Push the outstanding choice, and keep it if the push fails.
+   *
+   * The retry is the point, but so is the recovery on the one failure a client can actually fix. The
+   * server accepts this write only from a device whose own `autoApply` flag is set, and that flag is
+   * only ever set by reportControlAllowed - which dedupes against `lastReportedControl`. Sign out and
+   * back in and the device gets a BRAND NEW token row defaulting to autoApply off, while this object
+   * still remembers having reported sync as on, so it never tells the new row and every choice is
+   * refused for the life of the window. Forget the memo and let the opt-in go again.
+   */
+  private async flushSurfaceChoice(): Promise<void> {
+    const surface = this.pendingSurfaceChoice;
+    if (surface === undefined || !this.remoteControlAllowed || !this.currentToken) return;
+    try {
+      await this.account.reportSurfaceChoice(this.currentToken, surface);
+      // Only THIS value is settled; a newer choice made while the request was in flight must stand.
+      if (this.pendingSurfaceChoice === surface) this.pendingSurfaceChoice = undefined;
+    } catch {
+      this.lastReportedControl = undefined;
+      void this.reportControlAllowed();
     }
   }
 
@@ -1831,7 +2010,9 @@ export class Orchestrator {
       // Build ONCE. Each build assesses two surface cards, and an assessment reads both Claude Code
       // targets - several megabytes. Building twice quadrupled that for no benefit.
       const state = this.buildPanelState();
-      AwaitfulPanel.openOrReveal(this.context, (msg) => this.handlePanelMessage(msg), state).setState(state);
+      // update, never openOrReveal: this runs on every thinking tick and every refresh, and
+      // openOrReveal brings the tab to the front of its group. See AwaitfulPanel.update.
+      AwaitfulPanel.update(state);
     }
   }
 
@@ -1873,7 +2054,7 @@ export class Orchestrator {
         break;
       case 'consent-grant':
         if (isWebviewSurface(msg.id)) {
-          void this.enableWebviewSurface(msg.id, msg.takeover === true);
+          void this.enableWebviewSurface(msg.id, msg.takeover === true, false, true);
         } else {
           void this.consent.grant(msg.id as Parameters<ConsentStore['grant']>[0]);
           this.syncPanel();
@@ -1931,11 +2112,11 @@ export class Orchestrator {
       case 'set-surface':
         // File-modifying surfaces are enabled from their detail page, not here.
         if (isWebviewSurface(msg.id)) {
-          void this.enableWebviewSurface(msg.id, false);
+          void this.enableWebviewSurface(msg.id, false, false, true);
         } else if (msg.id === 'status-bar') {
           // The status bar is the always-available default surface — switching to it means
           // undoing the thinking-line patch (surfaces are mutually exclusive).
-          void this.switchToStatusBar();
+          void this.switchToStatusBar(true);
         } else {
           vscode.window.showInformationMessage(
             `Awaitful: the '${msg.id}' ad format will be available in a future update.`,
@@ -1956,7 +2137,14 @@ export class Orchestrator {
    * fail-safe: a foreign conflict without take-over consent, an unknown build, or a failed
    * health probe all leave the editor untouched and keep status-bar mode working.
    */
-  private async enableWebviewSurface(id: WebviewSurface, takeover: boolean): Promise<void> {
+  private async enableWebviewSurface(
+    id: WebviewSurface,
+    takeover: boolean,
+    auto = false,
+    /** The developer picked this on THIS device just now. Gates the shared write: an automatic apply
+     *  or a fail-safe fallback must never hijack the account's choice. */
+    localChoice = false,
+  ): Promise<void> {
     // An explicit re-enable is the user overriding our demotion. Clear it FIRST, or the activate
     // call below no-ops and their chosen surface silently stays unchecked.
     this.livenessSteppedBack = false;
@@ -1964,7 +2152,9 @@ export class Orchestrator {
     // An explicit enable is the user overriding our yield, so give the reclaim budget back.
     this.setReclaim(this.patch.assess().target?.buildId ?? 'unknown', 0);
     if (this.killswitch.isKilled) {
-      vscode.window.showWarningMessage('Awaitful: patching is paused server-side right now.');
+      // Not on the automatic path: the developer did not ask for anything here, and a server-side
+      // pause is not theirs to act on. The panel still shows the state.
+      if (!auto) vscode.window.showWarningMessage('Awaitful: patching is paused server-side right now.');
       return;
     }
 
@@ -1974,6 +2164,14 @@ export class Orchestrator {
     const preBuild = pre.target?.buildId ?? 'unknown';
     if (CONTESTED_STATES.has(pre.state) && this.getReclaim(preBuild) >= MAX_RECLAIM_ATTEMPTS) {
       const who = pre.foreign?.vendorInstalled === 'yes' && pre.foreign.vendor ? pre.foreign.vendor : 'another tool';
+      // An automatic apply must not open a modal asking "try anyway?" - nobody is standing here to
+      // answer it, and it would return every five minutes until they were. Record the reason and let
+      // the panel and the dashboard carry it.
+      if (auto) {
+        this.lastApplyFailure = 'foreign-conflict';
+        this.syncPanel();
+        return;
+      }
       const pick = await vscode.window.showWarningMessage(
         `Awaitful: ${who} is actively re-modifying Claude Code and will overwrite the ${surfaceLabel(id)} again on reload. To use it, disable ${who} first.`,
         'Manage extensions', 'Try anyway',
@@ -1987,18 +2185,32 @@ export class Orchestrator {
     this.reportPatchOutcome(res.ok);
     if (res.ok) {
       this.lastApplyFailure = null; // a successful apply clears any prior failure this device reported
+      this.autoFailureNotified.clear(); // whatever was wrong is not wrong now; let it speak if it returns
       await this.chooseWebviewSurface(id);
+      // HERE, not at the click. The write used to fire on intent, so a take-over dialog the developer
+      // then cancelled - or any apply that failed the health probe and rolled back - still told the
+      // account this device had switched, and every other device followed a change that never
+      // happened here. The shared choice now describes something that landed.
+      if (localChoice) this.reportSurfaceChoiceIfSynced(id);
       if (res.reloadNeeded) {
+        // The patch is on disk; the running Claude Code webview shows it only once it is recreated (next
+        // session, or a reload). The status-bar hint says so either way. But only a MANUAL apply gets a
+        // modal reload prompt - on the sync path a modal contradicts "apply automatically" this device
+        // opted into, so it stays a quiet status-bar hint, the same way the self-heal after a Claude Code
+        // update does. The one exception: a take-over that replaced a competitor still prompts even when
+        // synced, because it names a conflict the developer has to resolve, not a mere reload.
         this.applyState('reload-to-earn');
-        const label = surfaceLabel(id);
-        const pick = await vscode.window.showInformationMessage(
-          res.tookOver
-            ? `Awaitful is now active in the ${label} (replaced ${res.tookOver}). Reload to see it - and disable ${res.tookOver} to avoid conflicts.`
-            : `Awaitful is now active in the ${label}. Reload the window to see it.`,
-          'Reload window',
-        );
-        if (pick === 'Reload window') {
-          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+        if (!auto || res.tookOver) {
+          const label = surfaceLabel(id);
+          const pick = await vscode.window.showInformationMessage(
+            res.tookOver
+              ? `Awaitful is now active in the ${label} (replaced ${res.tookOver}). Reload to see it - and disable ${res.tookOver} to avoid conflicts.`
+              : `Awaitful is now active in the ${label}. Reload the window to see it.`,
+            'Reload window',
+          );
+          if (pick === 'Reload window') {
+            await vscode.commands.executeCommand('workbench.action.reloadWindow');
+          }
         }
       }
       this.syncPanel();
@@ -2008,6 +2220,16 @@ export class Orchestrator {
     // Fail-safe: explain, stay in status-bar mode. Record the coarse reason so the dashboard can show
     // WHY this editor did not switch, instead of an indefinite "confirm in your editor".
     this.lastApplyFailure = mapApplyFailure(res.reason);
+    // A manual attempt always speaks: the developer just clicked something and is owed an answer.
+    // An automatic one says each distinct thing once. See autoFailureNotified.
+    const failureKey = `${id}:${res.reason}`;
+    if (auto) {
+      if (this.autoFailureNotified.has(failureKey)) {
+        this.syncPanel();
+        return;
+      }
+      this.autoFailureNotified.add(failureKey);
+    }
     switch (res.reason) {
       case 'blocked':
         vscode.window.showWarningMessage(
@@ -2354,6 +2576,23 @@ export class Orchestrator {
     // Drop the choice FIRST so re-apply-on-activation cannot silently re-patch and
     // undo the restore (the surface only comes back when the user re-enables it).
     await this.clearWebviewChoice();
+
+    /**
+     * Clearing the LOCAL choice is not enough once an account can hold one too.
+     *
+     * The account's standing request survives a restore, and the reconciler acts on it: with sync on
+     * it re-patched within one check-in, silently, because 0.7.6 suppresses the message on that path.
+     * So the restore also has to stand the account down - by writing status-bar back where sync makes
+     * that this device's business, and by latching the format either way so the reconciler asks
+     * rather than assumes. See RESTORED_FROM_KEY.
+     */
+    const standing = this.remoteSurfacePref;
+    if (standing && standing !== 'status-bar') {
+      await this.context.globalState.update(RESTORED_FROM_KEY, standing);
+    }
+    this.remoteSurfacePref = 'status-bar';
+    this.reportSurfaceChoiceIfSynced('status-bar');
+
     this.activeSurface = 'status-bar';
     this.surface.end();
     // "Restore original files" undoes every Awaitful modification — including the terminal status
@@ -2400,8 +2639,11 @@ export class Orchestrator {
    * switching to it undoes the thinking-line patch and revokes its consent (so it doesn't
    * silently re-apply on the next activation). Earning continues immediately in the status bar.
    */
-  private async switchToStatusBar(): Promise<void> {
+  private async switchToStatusBar(localChoice = false): Promise<void> {
     this.lastApplyFailure = null; // the status bar is a deliberate destination, never a failure
+    // Before the early return below, deliberately: "already on the status bar" is a success, and the
+    // account may still be asking for something else. Unlike a patch, this cannot fail part way.
+    if (localChoice) this.reportSurfaceChoiceIfSynced('status-bar');
     const a = this.patch.assess();
     const patched = a.state === 'our-patch-present' || a.state === 'our-patch-stale';
     if (this.activeSurface === 'status-bar' && !patched) {
@@ -2546,6 +2788,20 @@ export class Orchestrator {
     this.accountName = undefined;
     this.earningsToday = undefined;
     this.unredeemedUsd = undefined;
+    /**
+     * Forget every "already told the server that" memo.
+     *
+     * Linking again mints a NEW device row with all its flags at their defaults, so each of these
+     * memos is now about a token the server has never seen. Keeping them means the next sign-in
+     * silently skips the report - and for `lastReportedControl` in particular that leaves the server
+     * believing this device is not synced, which makes it refuse every shared-format write this
+     * device sends, for as long as the window stays open.
+     */
+    this.lastReportedSurface = undefined;
+    this.lastReportedTerminal = undefined;
+    this.lastReportedFailure = undefined;
+    this.lastReportedControl = undefined;
+    this.pendingSurfaceChoice = undefined;
     this.applyState('signin');
     this.syncPanel();
   }

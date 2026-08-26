@@ -91,8 +91,9 @@ function isDerivedPristine(content: string, anchor: string, t: RecipeTarget): bo
  *   1. verified server recipe (confidence ≥ min)  → the fleet-attested hash
  *   2. embedded recipe (human-verified)           → the shipped fallback
  *   3. self-recipe (provisional)                  → trust-on-first-use on an unknown build: a clean
- *      target hashes its live file; a competitor-patched target recovers pristine from the
- *      competitor's own validated sibling backup, so take-over is available without a server recipe.
+ *      target hashes its live file (only if that file still carries the anchor our patch needs); a
+ *      competitor-patched target recovers pristine from the competitor's own validated sibling
+ *      backup, so take-over is available without a server recipe.
  * Every path re-assembles the recipe from OUR embedded shim/CSP; the engine re-verifies each hash
  * byte-for-byte before writing, so a wrong/contested server hash can only fail safe.
  */
@@ -201,7 +202,9 @@ export class RecipeClient {
     //  • competitor-patched target → recover pristine from the competitor's OWN validated sibling
     //    backup, so take-over is AVAILABLE without a server recipe. report() sends clean=false whenever
     //    a foreign backup is present, so a competitor-derived hash never votes in consensus.
-    //  • clean target              → the live file IS pristine (votable path).
+    //  • clean target              → the live file IS pristine, as long as it still carries the
+    //    target's anchor: a build our patch could not actually land on gets NO recipe, so the panel
+    //    says "not this build yet" instead of offering a surface that would roll back (votable path).
     // Detection is generic (any sibling backup), so this covers UNKNOWN competitors, not just named
     // ones. A verified server recipe, when it lands, supersedes this provisional one (see lookup order).
     const webPristine = this.pristineForSelf(web, f.web, wt, WEBVIEW_ANCHOR);
@@ -229,7 +232,10 @@ export class RecipeClient {
    *  - our OWN patch present → strip our patch; the result must be genuine, patchable Claude Code
    *    (no residual Awaitful marker AND carries the target's anchor), else we don't trust it.
    *  - competitor patch      → recover from the competitor's validated sibling backup.
-   *  - otherwise             → the live file is already pristine.
+   *  - otherwise             → the live file is already pristine, IF it is still patchable at all.
+   *
+   * Every branch ends at the same gate, so no branch can promise a surface another branch would
+   * refuse.
    */
   private pristineForSelf(content: string, file: string, t: RecipeTarget, anchor: string): string | undefined {
     if (hasOurPatch(content, t)) {
@@ -242,9 +248,16 @@ export class RecipeClient {
     }
     const foreign = detectForeign(file, content);
     if (foreign.present) return recoverPristine(foreign.backupPath, anchor, t);
-    // No marker of any kind: the live file is pristine. This is the only path that may vote in
-    // consensus (report() sends clean=false whenever a foreign patch is detected).
-    return content;
+    // No marker of any kind: the live file is pristine - but pristine is not the same as patchable,
+    // and this branch used to skip the check the other two make. On a Claude Code build whose
+    // extension.js no longer carries the CSP anchor (or whose webview bundle lost `spinnerRow_`), it
+    // minted a recipe anyway: assess() said 'clean-pristine', the panel offered the thinking line and
+    // chat banner, and enabling then wrote both files, failed the health probe and rolled back with an
+    // error nobody needed to see. Nothing was corrupted, but we had advertised support we did not have.
+    // Same gate, same verdict: no anchor → no recipe → the card says this build isn't supported yet.
+    // This is the only path that may vote in consensus (report() sends clean=false whenever a foreign
+    // patch is detected).
+    return isDerivedPristine(content, anchor, t) ? content : undefined;
   }
 
   // ── Consensus + patch-health report (rate-limited) ───────────────────────────

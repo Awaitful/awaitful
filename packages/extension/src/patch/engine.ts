@@ -336,7 +336,17 @@ export class PatchEngine {
           const rb = this.restore();
           return { ok: false, reason: 'no-pristine', rolledBack: rb.ok };
         }
-        atomicWrite(abs, applyToContent(pristine.toString('utf8'), t));
+        // A csp-insert whose `find` is absent from these bytes leaves them unchanged, so the write
+        // below would replace Claude Code's file with a copy of itself - and the health probe would
+        // then reject it and roll the whole pass back. We can see the change did not land BEFORE
+        // touching the disk, so decline here: same both-or-neither outcome, one fewer pointless
+        // rewrite of the editor's own bundle (golden rule 2).
+        const patched = applyToContent(pristine.toString('utf8'), t);
+        if (!isCurrentPatch(patched, t)) {
+          const rb = this.restore();
+          return { ok: false, reason: 'health-failed', rolledBack: rb.ok };
+        }
+        atomicWrite(abs, patched);
         changed = true;
       }
 
@@ -542,7 +552,13 @@ export function isCurrentPatch(text: string, t: RecipeTarget): boolean {
   return text.includes(t.replacement!); // csp-insert: exact current replacement
 }
 
-/** Apply this target's change to pristine content. */
+/**
+ * Apply this target's change to pristine content.
+ *
+ * A csp-insert whose `find` is absent from these bytes returns them UNCHANGED, so the result is
+ * never proof the change landed. `applyAll` re-checks with `isCurrentPatch` and declines the write
+ * rather than replace one of Claude Code's files with a copy of itself.
+ */
 export function applyToContent(pristine: string, t: RecipeTarget): string {
   if (t.strategy === 'append-shim') {
     return pristine + `\n${t.markerStart}\n` + t.shim + `\n${t.markerEnd}\n`;
@@ -550,7 +566,7 @@ export function applyToContent(pristine: string, t: RecipeTarget): string {
   // csp-insert: replace the unique `find` with `replacement` (indexOf avoids the
   // special `$` semantics of String.replace, since both contain `${...}`).
   const i = pristine.indexOf(t.find!);
-  if (i < 0) return pristine; // find missing → no-op (health probe will reject)
+  if (i < 0) return pristine; // find missing → no-op; the caller refuses to write it
   return pristine.slice(0, i) + t.replacement + pristine.slice(i + t.find!.length);
 }
 

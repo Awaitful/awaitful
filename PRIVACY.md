@@ -115,6 +115,13 @@ a format set on another device on their own. It is reported UP from the device o
 turn it on for you, because only the machine may authorize modifying Claude Code on it. No content leaves
 either way.
 
+And when **Sync across devices** is on, changing the ad format on that machine also sends the coarse
+surface id (for example `chat-banner`) to `POST /v1/me/surface-choice`, so your choice sticks and applies
+to your other synced devices instead of reverting to the last value set from the web. It is the same
+coarse surface id already sent above: no path, no filename, no content. The server accepts it only from a
+device you have turned sync on for, and with sync off, changing the format stays on that machine and
+nothing is sent.
+
 ### 8. Sign-in / device link - `POST /v1/auth/link/*`
 The one-time flow that ties this device to your account. Exchanges a link code for a device
 token. No content.

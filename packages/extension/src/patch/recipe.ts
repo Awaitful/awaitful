@@ -56,7 +56,7 @@ export interface PatchRecipe {
 // v25: hover link cue (underline + trailing arrow on hover, not at rest), a width-gated timer, a
 // fade-in on first appearance, and the new default 'signal' glow theme - all become PATCHED BYTES,
 // so the bump makes already-patched editors re-apply.
-export const SHIM_VERSION = 27;
+export const SHIM_VERSION = 28;
 export const MARKER_PREFIX = '/* AWAITFUL-START';
 export const MARKER_START = `${MARKER_PREFIX} v${SHIM_VERSION} */`;
 export const MARKER_END = '/* AWAITFUL-END */';
@@ -798,13 +798,20 @@ const DEFAULT_SHIM_CONFIG: ShimConfig = {
 };
 const THINKING_SHIM_BODY = shimForConfig(DEFAULT_SHIM_CONFIG);
 
-// The CSP relaxation is identical across builds (same webview CSP template). We put
-// our `connect-src` FIRST — immediately after `default-src 'none';`, before `${p}`
-// (which itself expands to a connect-src directive) — so ours is the effective one
-// (CSP uses the first `connect-src`; later duplicates are ignored). `awaitful.invalid`
-// is a unique, never-resolving marker host (RFC 6761); it permits no real connection.
-export const CSP_FIND = "default-src 'none'; ${p};";
-const CSP_REPLACEMENT = "default-src 'none'; connect-src http://127.0.0.1:* awaitful.invalid; ${p};";
+// Relax the webview's connection CSP by putting our `connect-src` FIRST — immediately after
+// `default-src 'none';`, before the build's interpolated directives — so ours is the effective one
+// (CSP uses the first `connect-src`; later duplicates are ignored). `awaitful.invalid` is a unique,
+// never-resolving marker host (RFC 6761); it permits no real connection.
+//
+// The anchor is `default-src 'none'; ${` — the literal CSP text plus the START of the first
+// interpolation — deliberately NOT a specific `${name}`. Claude Code assembles this CSP from a template
+// literal, so `default-src 'none'; ` and the `${` are stable, but the MINIFIED variable name inside is
+// reassigned build to build (`${p}` on older builds, `${B}` on 2.1.245). Hardcoding `${p}` is precisely
+// what silently broke csp-insert on newer builds: the find missed, the health probe then found no
+// replacement to strip, and the whole patch rolled back to status-bar mode. The other CSP
+// (`default-src 'none'; style-src ...`) has no `${` after the prefix, so this never matches it.
+export const CSP_FIND = "default-src 'none'; ${";
+const CSP_REPLACEMENT = "default-src 'none'; connect-src http://127.0.0.1:* awaitful.invalid; ${";
 
 /**
  * The two patch targets for a build, binding OUR embedded shim/CSP to the given pristine

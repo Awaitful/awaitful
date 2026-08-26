@@ -11,6 +11,7 @@ import {
   SurfaceAppliedRequestSchema,
   TerminalAppliedRequestSchema,
   AutoApplyReportSchema,
+  RemoteSurfacePreferenceRequestSchema,
 } from '../schemas.js';
 
 /**
@@ -30,6 +31,7 @@ import {
  *   POST /v1/me/surface-applied — SurfaceAppliedRequestSchema
  *   POST /v1/me/terminal-applied — TerminalAppliedRequestSchema
  *   POST /v1/me/auto-apply    — AutoApplyReportSchema
+ *   POST /v1/me/surface-choice — RemoteSurfacePreferenceRequestSchema (two-way sync; synced devices only)
  *   POST /v1/auth/link/start  — DeviceLinkStartRequestSchema
  *   GET  /v1/auth/link/poll   — DeviceLinkPollQuerySchema
  * The remaining calls — GET /v1/killswitch, /v1/me, /v1/earnings/summary — are parameterless: no
@@ -108,6 +110,13 @@ describe('egress whitelist — what leaves the machine', () => {
     // One boolean about this device's own consent state, reported up so the dashboard can show it.
     // The web can never SET it; a device only ever tells the server a fact about itself.
     expect(keysOf(AutoApplyReportSchema)).toEqual(['enabled']);
+  });
+
+  it('POST /v1/me/surface-choice carries only the coarse surface a synced device chose — no content', () => {
+    // Two-way sync: a synced device writes the shared surface preference when the developer changes the
+    // format there. The same coarse surface id the applied-surface report already sends - no path, no
+    // filename, no content - and the server accepts it only under this device's own sync opt-in.
+    expect(keysOf(RemoteSurfacePreferenceRequestSchema)).toEqual(['surface']);
   });
 
   it('POST /v1/auth/link/start carries only a random state nonce — no account, no content', () => {

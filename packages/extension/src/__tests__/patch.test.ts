@@ -11,6 +11,7 @@ import {
   PatchEngine, applyToContent, stripFromContent, hasOurPatch, type RecipeLookup,
 } from '../patch/engine.js';
 import { MARKER_START, MARKER_END, MARKER_PREFIX, findRecipe, assembleRecipe, type PatchRecipe, type RecipeTarget } from '../patch/recipe.js';
+import { RecipeClient } from '../patch/recipeClient.js';
 import { GLOW_THEMES } from '@awaitful/shared';
 import type { RecipeResponse } from '@awaitful/shared';
 
@@ -90,6 +91,29 @@ describe('csp-insert transforms', () => {
   it('handles the literal ${...} without $-substitution bugs', () => {
     const patched = applyToContent(EXT, EXT_TARGET);
     expect(patched).toContain('${p}'); // preserved verbatim
+  });
+
+  // Regression: the REAL recipe's CSP find must anchor on `default-src 'none'; ${` and NOT a specific
+  // minified variable name. Claude Code renamed that variable from ${p} to ${B} in 2.1.245, which made
+  // the old hardcoded `${p};` find miss, the health probe reject, and the whole patch roll back to
+  // status bar. This drives the actual assembled recipe (not the local ${p} fixtures above) against a
+  // build whose first CSP variable is ${B}; it fails outright if the anchor regresses to a fixed name.
+  it('csp find anchors on ${ regardless of the minified variable name (2.1.245 ${B} regression)', () => {
+    const resp = {
+      agent: 'claude-code', buildId: BUILD_ID, version: '2.1.245', confidence: 0.5, status: 'provisional',
+      targets: [
+        { file: 'webview/index.js', strategy: 'append-shim', pristineSha256: sha256(WEB) },
+        { file: 'extension.js', strategy: 'csp-insert', pristineSha256: sha256('x') },
+      ],
+    } as unknown as RecipeResponse;
+    const cspTarget = assembleRecipe(resp)?.targets.find(t => t.strategy === 'csp-insert');
+    expect(cspTarget).toBeDefined();
+
+    const extB = "HEADER; default-src 'none'; ${B}; ${N}; script-src 'nonce-${U}'; TAIL";
+    const patched = applyToContent(extB, cspTarget!);
+    expect(patched).toContain('connect-src http://127.0.0.1:* awaitful.invalid');
+    expect(patched.indexOf('connect-src http://127.0.0.1')).toBeLessThan(patched.indexOf('${B}'));
+    expect(stripFromContent(patched, cspTarget!)).toBe(extB); // the exact health-probe round-trip
   });
 });
 
@@ -479,6 +503,89 @@ describe('apply', () => {
     const a = engine().assess();
     expect(a.state).toBe('unknown-modified');
     expect(a.recoverable).toBe('yes');
+  });
+
+  /**
+   * A csp-insert whose `find` is absent from pristine produces byte-identical output. Writing it
+   * replaced Claude Code's own bundle with a copy of itself, purely so the health probe could reject
+   * it a moment later and roll the pass back. The bytes end up the same either way - the point is
+   * that we never touch the editor's file once we can already see the change will not land.
+   */
+  it('never writes a target whose change cannot land (the no-op write is refused, not rolled back)', () => {
+    const anchorless = "HEADER; script-src 'nonce'; TAIL"; // genuine pristine for this build, no CSP anchor
+    fs.writeFileSync(webFile, WEB, 'utf8');
+    fs.writeFileSync(extFile, anchorless, 'utf8');
+    const recipe: PatchRecipe = {
+      ...RECIPE,
+      targets: [WEB_TARGET, { ...EXT_TARGET, pristineSha256: sha256(anchorless) }],
+    };
+    const before = fs.statSync(extFile);
+
+    const res = engine(() => recipe).apply();
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.reason).toBe('health-failed');
+      expect(res.rolledBack).toBe(true);
+    }
+    // The inode, not just the contents: an atomic write renames a new file over this one, so the
+    // bytes alone cannot tell "never written" from "written with identical content".
+    expect(fs.statSync(extFile).ino).toBe(before.ino);
+    expect(readFile(extFile)).toBe(anchorless);
+    expect(readFile(webFile)).toBe(WEB); // and the sibling target we did write is back to pristine
+  });
+});
+
+// ── self-recipe: only promise a surface we can actually deliver ────────────────
+/**
+ * On an unknown Claude Code build the client mints a provisional recipe from the live files. The
+ * clean branch used to hash them unchecked, so a build whose extension.js had lost the CSP anchor
+ * still produced a recipe: assess() said 'clean-pristine', the panel offered the thinking line and
+ * chat banner, and enabling wrote both files, failed the health probe and rolled back with an error
+ * the developer did not need to see. Nothing was corrupted - we had just advertised support we did
+ * not have. The anchor is now checked on every branch, so an unpatchable build resolves to no recipe.
+ */
+describe('self-recipe anchor gate', () => {
+  const UNKNOWN = 'anthropic.claude-code-9.9.9-darwin-x64'; // no embedded recipe → the self path runs
+  // The webview fixture plus the class our shim anchors on; EXT already carries the CSP anchor.
+  const WEB_ANCHORED = WEB + 'var _u={spinnerRow:"spinnerRow_ab12"};\n';
+  let dir: string, web: string, ext: string;
+
+  beforeEach(() => {
+    dir = path.join(root, UNKNOWN);
+    fs.mkdirSync(path.join(dir, 'webview'), { recursive: true });
+    web = path.join(dir, 'webview', 'index.js');
+    ext = path.join(dir, 'extension.js');
+  });
+
+  const client = () => new RecipeClient('http://127.0.0.1:0', () => undefined, () => dir);
+  const stateWith = (c: RecipeClient) =>
+    new PatchEngine(new BackupStore(storageDir), (id) => c.lookup(id), () => dir).assess().state;
+
+  it('self-activates a clean unknown build that carries both anchors', () => {
+    fs.writeFileSync(web, WEB_ANCHORED, 'utf8');
+    fs.writeFileSync(ext, EXT, 'utf8');
+    const c = client();
+    expect(c.lookup(UNKNOWN)).toBeDefined();
+    expect(c.isProvisionalActive()).toBe(true);
+    expect(stateWith(c)).toBe('clean-pristine');
+  });
+
+  it('mints no recipe when a clean extension.js has lost the CSP anchor', () => {
+    fs.writeFileSync(web, WEB_ANCHORED, 'utf8');
+    fs.writeFileSync(ext, "HEADER; script-src 'nonce'; TAIL", 'utf8');
+    const c = client();
+    expect(c.lookup(UNKNOWN)).toBeUndefined();
+    expect(c.isProvisionalActive()).toBe(false);
+    // What the panel reads: not supported on this build yet, rather than a surface that rolls back.
+    expect(stateWith(c)).toBe('no-recipe');
+  });
+
+  it('mints no recipe when a clean webview bundle has lost the spinner anchor', () => {
+    fs.writeFileSync(web, WEB, 'utf8'); // the base fixture carries no spinnerRow_ class
+    fs.writeFileSync(ext, EXT, 'utf8');
+    const c = client();
+    expect(c.lookup(UNKNOWN)).toBeUndefined();
+    expect(stateWith(c)).toBe('no-recipe');
   });
 });
 

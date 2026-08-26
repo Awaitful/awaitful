@@ -257,19 +257,43 @@ export class AwaitfulPanel {
     );
   }
 
+  /**
+   * Open the panel, or bring an already-open one forward. REVEALS, so it is only ever correct for
+   * something the developer just asked for: a command, a notification they clicked, or the page
+   * being restored after they pressed Reload here.
+   *
+   * Never call this to deliver a state update. See `update`.
+   */
   static openOrReveal(
     context: vscode.ExtensionContext,
     onMessage: (msg: PanelMessage) => void,
     state: PanelState,
   ): AwaitfulPanel {
     if (AwaitfulPanel.instance) {
-      AwaitfulPanel.instance.panel.reveal(vscode.ViewColumn.Active, true);
+      // Its OWN column, not the active one. Revealing into the active column drags the tab across
+      // the window to wherever the developer happens to be working, which is a second surprise on
+      // top of the tab changing at all.
+      AwaitfulPanel.instance.panel.reveal(AwaitfulPanel.instance.panel.viewColumn, true);
       AwaitfulPanel.instance.setState(state);
       return AwaitfulPanel.instance;
     }
     const inst = new AwaitfulPanel(context, onMessage, state);
     AwaitfulPanel.instance = inst;
     return inst;
+  }
+
+  /**
+   * Deliver a state update to an open panel, and do NOTHING if it is closed.
+   *
+   * The separation is the whole point. `syncPanel` runs on 35 different occasions - every thinking
+   * tick, every account refresh, every presence change - and it used to reach the open panel through
+   * `openOrReveal`, which reveals. So the panel hauled its own tab to the front of its group over
+   * and over: a developer talking to their agent watched the settings tab replace whatever they were
+   * reading, on a window nobody had reloaded and a panel nobody had asked for. Updating state and
+   * asking for attention are different acts and must not share a door.
+   */
+  static update(state: PanelState): void {
+    AwaitfulPanel.instance?.setState(state);
   }
 
   static isOpen(): boolean {
@@ -356,6 +380,8 @@ body.vscode-light{
   --warn:oklch(52% 0.140 58);
   --warn-bg:oklch(52% 0.140 58 / 0.08);
   --warn-edge:oklch(52% 0.140 58 / 0.28);
+  --danger:oklch(48% 0.190 26);
+  --danger-edge:oklch(48% 0.190 26 / 0.30);
   --toggle-off:oklch(10% 0.004 135 / 0.18);
 }
 body.vscode-dark,body.vscode-high-contrast{
@@ -369,6 +395,8 @@ body.vscode-dark,body.vscode-high-contrast{
   --warn:oklch(80% 0.120 72);
   --warn-bg:oklch(80% 0.120 72 / 0.11);
   --warn-edge:oklch(80% 0.120 72 / 0.32);
+  --danger:oklch(74% 0.150 26);
+  --danger-edge:oklch(74% 0.150 26 / 0.34);
   --toggle-off:oklch(86% 0.171 134 / 0.20);
 }
 /* fallback for unthemed body */
@@ -641,8 +669,11 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .footer{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px}
 .btn-ghost{font-size:12px;color:var(--text-2);background:none;border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;transition:border-color 100ms,color 100ms}
 .btn-ghost:hover{border-color:var(--border-strong);color:var(--text)}
-.btn-ghost.danger{color:oklch(40% 0.18 26);border-color:oklch(40% 0.18 26 / 0.3)}
-.btn-ghost.danger:hover{background:oklch(40% 0.18 26 / 0.07)}
+/* Tokenised per theme. This was one hardcoded 40%-lightness red for both, which reads on white and
+   all but vanishes against the dark surface - on the button that undoes every file change we made,
+   which is the last control that should be hard to find. */
+.btn-ghost.danger{color:var(--danger);border-color:var(--danger-edge)}
+.btn-ghost.danger:hover{background:color-mix(in oklab, var(--danger) 9%, transparent)}
 
 /* ── Detail view ── */
 .view{display:none}
@@ -785,7 +816,7 @@ body:not(.vscode-light):not(.vscode-dark):not(.vscode-high-contrast){
 .btn-primary:hover{opacity:.88}
 
 /* ── Ad callout (when ad is showing) ── */
-.ad-callout{background:var(--active-bg);border:1px solid var(--active-border);border-radius:8px;padding:10px 12px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ad-callout{background:var(--active-bg);border:1px solid var(--active-border);border-radius:8px;padding:10px 12px;margin-bottom:14px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
 .ad-line{font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ad-unpaid{font-size:11px;color:var(--text-3);margin-top:4px;width:100%}
 .btn-visit{font-size:11px;font-weight:600;color:var(--cta-text);background:var(--cta);border:none;border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:opacity 100ms}
@@ -1741,6 +1772,11 @@ function detailPrimary(id, sv, m) {
 // Status bar modifies nothing, so its detail page is deliberately simpler than the patch surfaces':
 // the shared illustration (highlighting the status bar), what it is, a one-tap activate, and a plain
 // "No file changes" reassurance. No consent gate, no file disclosure, no restore/reload.
+//
+// Simpler, but not silent when it is stopped. Its card says "Fix it →" like the other three, and
+// this page used to open on a description and a missing button - the promise made on the card with
+// nothing behind it. The one thing that can stop the status bar is a machine with no Claude Code on
+// it, which is exactly the case the shared guidance box already names and gives the steps for.
 function buildStatusBarDetail() {
   const m = META['status-bar'];
   const sv = (state.vsSurfaces || []).find(s => s.id === 'status-bar') || {};
@@ -1758,6 +1794,12 @@ function buildStatusBarDetail() {
   if (chip) titleRow.append(chip);
   const desc = el('div', 'detail-desc'); desc.textContent = m.desc;
   panel.append(detailHead(titleRow, detailPrimary('status-bar', sv, m)), desc);
+
+  // Above the styling controls, same as on the other three pages: the reason it cannot run comes
+  // before how it would look. The same box too - a parallel one here would be a second place for the
+  // no-Claude-Code copy to drift.
+  const blocked = buildBlockedBox('status-bar', sv, m);
+  if (blocked) panel.append(blocked);
 
   const cz = buildCustomize('status-bar');
   if (cz) panel.append(cz);

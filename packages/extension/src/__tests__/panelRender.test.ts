@@ -1292,6 +1292,31 @@ describe('a machine with no agent', () => {
   });
 
   /**
+   * The status bar's card says "Fix it →" like the other three, and its page was the only one with
+   * nothing behind that promise: a description, no reason, no way out. It cannot be contested or
+   * unsupported - the single thing that stops it is a machine with no Claude Code on it - so it owes
+   * the page exactly the guidance the other three already carry, from the same box.
+   */
+  it('gives the status bar page the reason it is stopped, and the fix', () => {
+    const api = mount({
+      ...STATE,
+      anyAgentCli: false, anyAgentEditor: false, terminalBlockedReason: 'no-agent-cli',
+      vsSurfaces: STATE.vsSurfaces.map(s => ({ ...s, active: false, blockedReason: 'no-agent-cli' as const })),
+    });
+    api.openDetail('status-bar');
+    expect(pageText()).toContain('Claude Code is not on this machine');
+    // Still nothing to turn on here - the box owns the page, and the format cannot run yet.
+    expect(root.querySelectorAll('detail-head')).toHaveLength(0);
+
+    // The reason without the steps is the same dead end in fewer words.
+    const steps = root.querySelectorAll('conflict-step');
+    expect(steps.length, 'the reason arrives with no fix under it').toBeGreaterThan(0);
+    posted = [];
+    steps[0]!.querySelectorAll('conflict-act')[0]!.onclick!();
+    expect(posted).toEqual([{ type: 'open-setup-docs' }]);
+  });
+
+  /**
    * One voice for every stopped format. A missing Claude Code used to render as grey caption text
    * while a competitor's conflict got an amber callout - the same problem looking like two different
    * classes of thing depending on which reason stopped it.

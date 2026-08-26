@@ -67,6 +67,22 @@ describe('AccountClient', () => {
     );
   });
 
+  it('reportSurfaceChoice puts only the chosen surface on the wire (two-way sync)', async () => {
+    const fetchFn = mockFetchOnce(204, undefined);
+
+    const client = new AccountClient('http://localhost:3000');
+    await client.reportSurfaceChoice('tok-1', 'chat-banner');
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://localhost:3000/v1/me/surface-choice',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ surface: 'chat-banner' }),
+        headers: expect.objectContaining({ Authorization: 'Bearer tok-1' }),
+      }),
+    );
+  });
+
   it('throws HttpError with the status on a revoked token', async () => {
     mockFetchOnce(401, { error: 'Token revoked or unlinked' });
 
