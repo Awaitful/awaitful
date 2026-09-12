@@ -27,16 +27,23 @@ export interface PayoutCorridorField {
   /**
    * A named structural check the field must also pass, for a format whose validity is arithmetic rather
    * than shape - a Brazilian CPF carries two mod-11 check digits, so "eleven digits" accepts a great many
-   * numbers that are not CPFs. Named (not a function) to keep corridors serializable data; `checkFns` below
-   * holds the implementations.
+   * numbers that are not CPFs, and an IBAN carries a mod-97 checksum over its whole body. Named (not a
+   * function) to keep corridors serializable data; `checkFns` below holds the implementations.
    */
-  check?: 'cpf';
+  check?: 'cpf' | 'iban';
   /** Shown when the value is empty or fails `pattern`. Written in the user's own terms (docs/VOICE.md). */
   error: string;
   optional?: boolean;
   inputMode?: 'text' | 'numeric' | 'tel' | 'email';
   /** Uppercase as the developer types (IFSC codes are conventionally upper). */
   uppercase?: boolean;
+  /**
+   * Remove every space before the value reaches the rail, for an identifier people habitually write in
+   * groups (an IBAN is printed in fours). The FORM still accepts the spaces - making someone retype a
+   * 22-character number without them is exactly the friction that loses a developer mid-onboarding - they
+   * simply never travel. Absent = the value is sent as typed, which is what every pre-existing field wants.
+   */
+  stripWhitespace?: boolean;
   /** Fixed choices. Two options render as chips, more as a select. */
   options?: readonly { value: string; label: string }[];
   /**
@@ -273,10 +280,178 @@ const BRAZIL: PayoutCorridor = {
   ],
 };
 
+// ── Europe: the euro area (EUR) ────────────────────────────────────────────────────────────────
+// The cheapest corridor we have, and the simplest bank identifier: a USD->EUR recipient of Wise type `iban`
+// is `legalType` + `accountHolderName` + ONE IBAN for the whole euro area (plus the postal address every
+// corridor needs, below), which is why twenty-one countries share one method definition instead of an entry
+// each. `EURO_AREA_OVERRIDES` is how a single country diverges without disturbing the other twenty.
+//
+// RECONCILED against the sandbox (2026-09-06, business profile, BALANCE payIn + BANK_TRANSFER payOut, the
+// exact route `initiatePayout` uses), end to end through `POST /v1/transfers` rather than stopping at
+// recipient creation. Stopping early is precisely what would have hidden the address requirement:
+//   - `POST /v1/transfer-requirements` returns NO required regulatory field for EUR (nor for GBP, SEK or
+//     PLN). Brazil's `transferNature` and India's cascading `transferPurpose` have no analogue here, so
+//     `resolveTransferDetails` finds nothing to fill and the transfer is not pausable for a missing
+//     declaration. Re-check per corridor before opening one; it is not a property of Europe in general.
+//   - It also reports nothing missing when the recipient has NO ADDRESS, and `POST /v1/accounts` creates
+//     that recipient happily - yet the transfer is then rejected. See `RECIPIENT_ADDRESS_FIELDS` below;
+//     the same is true of the live `indian` and `brazil` types, which is a known open item for them.
+//   - Bulgaria adopted the euro on 2026-01-01 and BGN is no longer routable from USD, so BG belongs in this
+//     list rather than in a lev corridor of its own.
+//
+// INDIVIDUAL RECIPIENTS ONLY, pinned exactly the way Brazil pins it - but here it is a TAX decision rather
+// than a rail one. Our `W8BenForm` documents a foreign PERSON; a developer billing through a company owes a
+// W-8BEN-E, which we do not collect. Offering a BUSINESS `legalType` would let them onboard into a tax form
+// we cannot issue, so business recipients wait for W-8BEN-E rather than for a rail change.
+/**
+ * The recipient's own postal address, which Wise requires on the TRANSFER even though it does not require
+ * it on the recipient.
+ *
+ * This one cost a round of verification worth writing down. `POST /v1/accounts` happily creates a recipient
+ * with no address at all, and `POST /v1/transfer-requirements` reports nothing further needed - so both of
+ * the checks we would naturally trust say "you are done". `POST /v1/transfers` then rejects with
+ * `validation.failure.address.*.empty`. Measured 2026-09-06 against the sandbox for EUR, and the same is
+ * true of the live INR and BRL types, so the failure would land at the very last step of a push-last flow.
+ *
+ * The keys are DOTTED because that is how Wise's own account-requirements names them, and dotted keys keep
+ * corridors flat, serializable, and inside the existing `Record<string, string>` wire contract. The rail
+ * expands them into the nested object Wise actually wants (a flat `"address.country"` is rejected).
+ */
+const RECIPIENT_ADDRESS_FIELDS: readonly PayoutCorridorField[] = [
+  {
+    key: 'address.firstLine',
+    label: 'Street address',
+    placeholder: 'Alexanderplatz 1',
+    error: 'Enter the street address your bank has for you.',
+  },
+  {
+    key: 'address.city',
+    label: 'City',
+    placeholder: 'Berlin',
+    error: 'Enter your city.',
+  },
+  {
+    key: 'address.postCode',
+    label: 'Postcode',
+    placeholder: '10115',
+    error: 'Enter your postcode.',
+  },
+];
+
+/**
+ * One euro-area bank method. Parameterised by country for a single reason: the recipient's `address.country`
+ * is a value we ALREADY know - it is the payout country the developer picked, and it is permanent - so it
+ * rides in `staticDetails` rather than becoming a fourth address field asking someone to retype a fact they
+ * have already given us.
+ */
+const sepaIbanMethod = (country: string): PayoutCorridorMethod => ({
+  id: 'bank',
+  label: 'Bank account',
+  confirmNoun: 'bank account details',
+  recipientType: 'iban',
+  mask: { field: 'IBAN', style: 'last4' },
+  staticDetails: { legalType: 'PRIVATE', 'address.country': country },
+  fields: [
+    {
+      // Wise's own key is upper-case `IBAN`; `details` is passed through verbatim, so this must match.
+      key: 'IBAN',
+      label: 'IBAN',
+      placeholder: 'DE89 3704 0044 0532 0130 00',
+      note: 'The international account number on your statement or in your banking app. Spaces are fine.',
+      // Deliberately loose. The real rules - per-country length and the mod-97 checksum - live in
+      // `isValidIban`, and this only has to reject something that is not an IBAN at all. Note it does NOT
+      // require the IBAN's country to match the corridor's: SEPA forbids "IBAN discrimination", so a
+      // developer living in one euro-area country may perfectly well be paid into another's account.
+      pattern: '^[A-Za-z]{2}[0-9]{2}[A-Za-z0-9 ]{10,34}$',
+      check: 'iban',
+      error: 'That does not look like a valid IBAN. Check the digits and try again.',
+      uppercase: true,
+      stripWhitespace: true,
+    },
+    ...RECIPIENT_ADDRESS_FIELDS,
+  ],
+});
+
+/**
+ * The euro area as of 2026-01-01, when Bulgaria became its twenty-first member. Every one of these settles
+ * in EUR through the one method above, so opening a country is a row in this list - not a corridor, a form
+ * branch or a rail change. Exported because the Wise fee schedule keys off it too: Wise prices the
+ * CURRENCY, so all twenty-one share one measured fee rather than twenty-one guesses.
+ */
+export const EURO_AREA_COUNTRIES: readonly string[] = [
+  'AT', 'BE', 'BG', 'CY', 'DE', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR',
+  'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PT', 'SI', 'SK',
+];
+
+/**
+ * How ONE euro-area country may diverge from the shared shape above, without any of the other twenty
+ * noticing.
+ *
+ * The shared definition is right by default - all twenty-one really do take the same single IBAN today, and
+ * twenty-one hand-copied blobs would be twenty-one chances to miss a fix that belongs to every one of them.
+ * But "shared" must never mean "editing Malta edits Germany", because the countries do not fail together:
+ * one is live and paying while another is being repaired. So divergence gets its own, explicit slot.
+ *
+ * Which edit goes where:
+ *   - A rule that belongs to the euro area as a whole (Wise changes what an `iban` recipient needs) edits
+ *     `sepaIbanMethod`, and SHOULD reach all twenty-one. That is the reason they share.
+ *   - A rule that belongs to ONE country (its bank wants an extra field) is a row here, and reaches only
+ *     that country. `euroCorridorShape` in the tests pins what every country currently resolves to, so a
+ *     change meant for one that leaks into the rest fails loudly instead of shipping.
+ * A country in trouble can also be pulled back on its own: `previewCountries` is per country, not per rail.
+ */
+export interface EuroCorridorOverride {
+  /** Fields this country needs on top of the shared shape, appended after them. */
+  extraFields?: readonly PayoutCorridorField[];
+  /** Replace one shared field outright, keyed by its `key`. Leaves every other country's copy alone. */
+  replaceFields?: Readonly<Record<string, PayoutCorridorField>>;
+  /** A floor for this country alone, overriding the euro-area default below. */
+  minPayoutUsd?: number;
+}
+
+/**
+ * Per-country divergence, keyed by ISO-2. DELIBERATELY EMPTY: every euro-area country is identical today,
+ * and an empty map is the honest way to say so while leaving the seam in place for the day one is not.
+ */
+export const EURO_AREA_OVERRIDES: Readonly<Record<string, EuroCorridorOverride>> = {};
+
+/**
+ * Apply one country's override to the shared method. Pure and exported so the MECHANISM can be tested even
+ * while the override map is empty - the alternative is a seam nobody exercises until the day it matters.
+ */
+export function applyEuroOverride(
+  base: PayoutCorridorMethod,
+  override: EuroCorridorOverride | undefined,
+): PayoutCorridorMethod {
+  if (!override) return base;
+  const replaced = base.fields.map(f => override.replaceFields?.[f.key] ?? f);
+  return { ...base, fields: [...replaced, ...(override.extraFields ?? [])] };
+}
+
+/**
+ * One euro-area corridor: the shared shape, plus this country's override if it has one.
+ *
+ * The floor is sized from MEASURED sandbox quotes (2026-09-06): $5->$0.57, $10->$0.58, $20->$0.62,
+ * $50->$0.70, $100->$0.85, $200->$1.14, i.e. ~$0.55 fixed + ~0.295%. At $20 that is ~3.1% all-in, right on
+ * the ~3% rule; $10 would be ~5.8%. As with Brazil this is the corridor's OPENING position, not its final
+ * one: `PayoutCountryPolicy` overrides it per country without a deploy, and the platform's two-tier
+ * threshold still applies underneath (resolution is DB override -> this default -> none, then a `max`).
+ */
+const euroCorridor = (country: string): PayoutCorridor => {
+  const override = EURO_AREA_OVERRIDES[country];
+  return {
+    country,
+    currency: 'EUR',
+    minPayoutUsd: override?.minPayoutUsd ?? 20,
+    methods: [applyEuroOverride(sepaIbanMethod(country), override)],
+  };
+};
+
 /** Every corridor we can pay, keyed by ISO-2. */
 export const PAYOUT_CORRIDORS: Readonly<Record<string, PayoutCorridor>> = {
   IN: INDIA,
   BR: BRAZIL,
+  ...Object.fromEntries(EURO_AREA_COUNTRIES.map(country => [country, euroCorridor(country)])),
 };
 
 /** The corridor for a country, or undefined when none is defined. Case-insensitive. */
@@ -322,9 +497,50 @@ export function isValidCpf(raw: string): boolean {
   return true;
 }
 
+/**
+ * IBAN lengths by country, for the countries a euro-area developer plausibly banks in: the twenty-one euro
+ * members, plus the SEPA micro-states and neighbours whose IBANs legitimately turn up on euro accounts.
+ *
+ * A prefix that is NOT in this table skips the length check and is judged by the checksum alone. That is
+ * deliberate, and it is the same instinct as the permissive patterns above: refusing an IBAN merely because
+ * we have no length on file for its country would strand a developer the rail would have accepted.
+ */
+const IBAN_LENGTHS: Readonly<Record<string, number>> = {
+  AD: 24, AT: 20, BE: 16, BG: 22, CH: 21, CY: 28, CZ: 24, DE: 22, DK: 18, EE: 20,
+  ES: 24, FI: 18, FR: 27, GB: 22, GR: 27, HR: 21, HU: 28, IE: 22, IS: 26, IT: 27,
+  LI: 21, LT: 20, LU: 20, LV: 21, MC: 27, MT: 31, NL: 18, NO: 15, PL: 28, PT: 25,
+  RO: 24, SE: 24, SI: 19, SK: 24, SM: 27, VA: 22,
+};
+
+/**
+ * Is this a real IBAN? The two digits after the country code are a mod-97 checksum over everything else
+ * (ISO 13616 / ISO 7064), so a single mistyped or transposed character fails arithmetically.
+ *
+ * This is the euro area's exact analogue of `isValidCpf`, and it earns its place the same way: without it a
+ * shape-only rule accepts a typo, the developer confirms, and Wise rejects the recipient at the FINAL step -
+ * after the push-last flow has already committed their W-8BEN. Catching it here turns that into an inline
+ * field error while they are still typing.
+ */
+export function isValidIban(raw: string): boolean {
+  const compact = raw.replace(/\s+/g, '').toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(compact)) return false;
+  const expected = IBAN_LENGTHS[compact.slice(0, 2)];
+  if (expected !== undefined && compact.length !== expected) return false;
+  // Move the country code and check digits to the end, map A-Z to 10-35, then reduce mod 97 one digit at a
+  // time - the rearranged number runs to 30-odd digits, far past what Number can hold exactly.
+  const rearranged = compact.slice(4) + compact.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const mapped = ch >= 'A' ? (ch.charCodeAt(0) - 55).toString() : ch;
+    for (const digit of mapped) remainder = (remainder * 10 + Number(digit)) % 97;
+  }
+  return remainder === 1;
+}
+
 /** The structural checks a corridor field can name, by id. */
 const checkFns: Record<NonNullable<PayoutCorridorField['check']>, (value: string) => boolean> = {
   cpf: isValidCpf,
+  iban: isValidIban,
 };
 
 /** Whether a field applies, given what the developer has filled in so far (`showWhen`). */
@@ -389,8 +605,9 @@ export function validatePayoutFields(
 }
 
 /**
- * The rail `details` payload for a method: every active field's trimmed value, uppercased where the field
- * asks, plus the method's fixed values. Optional fields that are blank are omitted rather than sent empty.
+ * The rail `details` payload for a method: every active field's trimmed value, uppercased and de-spaced
+ * where the field asks, plus the method's fixed values. Optional fields that are blank are omitted rather
+ * than sent empty.
  */
 export function payoutDetailsPayload(
   method: PayoutCorridorMethod,
@@ -400,7 +617,8 @@ export function payoutDetailsPayload(
   for (const field of activePayoutFields(method, values)) {
     const raw = (values[field.key] ?? '').trim();
     if (!raw) continue;
-    details[field.key] = field.uppercase ? raw.toUpperCase() : raw;
+    const value = field.stripWhitespace ? raw.replace(/\s+/g, '') : raw;
+    details[field.key] = field.uppercase ? value.toUpperCase() : value;
   }
   return details;
 }

@@ -11,10 +11,11 @@ import { getJson, postJson } from '../lib/http.js';
  * The schema whitelist (packages/shared/src/__tests__/egress.test.ts) pins WHAT each body or query
  * may contain; this test pins what the WRAPPERS themselves send.
  *
- * That matters most for the calls with no schema to pin: GET /v1/killswitch, /v1/me and
- * /v1/earnings/summary. They carry no body and no query - just the Bearer token - and this test
- * proves it structurally: getJson issues a GET with no request body at all, so those three cannot
- * carry content even in principle. postJson is proven to send byte-for-byte the caller's body and
+ * That matters most for the calls with no schema to pin: GET /v1/me and /v1/earnings/summary carry
+ * no body and no query at all - just the Bearer token - and this test proves it structurally:
+ * getJson issues a GET with no request body, so they cannot carry content even in principle.
+ * (/v1/killswitch now carries one query parameter, `platform`, pinned by KillswitchQuerySchema in
+ * the shared whitelist and by clientRequests.test.ts here.) postJson is proven to send byte-for-byte the caller's body and
  * nothing more, so a POST can only ever contain a whitelisted (schema-pinned) shape plus the token.
  */
 describe('the egress chokepoint — what the wrappers put on the wire', () => {

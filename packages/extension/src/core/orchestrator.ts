@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { LINKS, GLOW_KEYFRAMES, AD_FORMATS, getSpinner, frameAt, allFormatSettings, type AdFormatId, type ElementId, type ElementValue } from '@awaitful/shared';
-import type { AdEvent, StatusBarState, PlacementId, Creative, RemoteSurfaceId, AdSpinner, AdPreferences, SurfaceApplyFailure } from '@awaitful/shared';
-import { apiBaseUrl, REDUCE_MOTION_SETTING } from '../lib/config.js';
+import type { AdEvent, AgentId, StatusBarState, PlacementId, Creative, RemoteSurfaceId, AdSpinner, AdPreferences, SurfaceApplyFailure } from '@awaitful/shared';
+import { apiBaseUrl, CLIENT_PLATFORM, REDUCE_MOTION_SETTING } from '../lib/config.js';
 import { SlateCache } from './slateCache.js';
 import { KillswitchMonitor } from '../killswitch/monitor.js';
 import { EventQueue } from '../metrics/eventQueue.js';
@@ -271,6 +271,8 @@ export class Orchestrator {
   private activeSlateId: string | undefined;
   private activeAdLine: string | undefined;
   private activeAdUnpaid = false;
+  /** Which agent's hook opened the current turn, when it said. */
+  private activeAgent: AgentId | undefined;
   private activeAdUrl: string | undefined;
   private activeCreative: Creative | undefined;
   /**
@@ -515,7 +517,7 @@ export class Orchestrator {
     });
 
     this.hookServer = new HookServer({
-      onStart: () => this.onThinkingStart(),
+      onStart: (agent) => this.onThinkingStart(agent),
       onStop: () => this.onThinkingStop(),
       onPause: () => this.onThinkingPause(),
       onResume: () => this.onThinkingResume(),
@@ -935,7 +937,11 @@ export class Orchestrator {
     void this.refreshPresence().then(() => { this.applyState(this.activeState()); this.syncPanel(); });
   }
 
-  private onThinkingStart(): void {
+  private onThinkingStart(agent?: AgentId): void {
+    // Whoever's hook opened this turn. Undefined for a hook installed before the callback named
+    // itself, and that stays undefined all the way to the wire: "we do not know" is true, while
+    // defaulting to the only agent we support would record a guess as a fact.
+    this.activeAgent = agent;
     this.markThoughtSeen();
     // We are the host the agent is actually driving. Shims prefer a serving host when they scan,
     // so this is what makes them converge here instead of on an idle window's host.
@@ -1168,8 +1174,10 @@ export class Orchestrator {
       adId: this.terminalAdId,
       slateId: this.terminalSlateId,
       placement: 'terminal',
+      platform: CLIENT_PLATFORM,
       occurredAtClientMs: Date.now(),
       ...(visibleMs !== undefined ? { visibleMs } : {}),
+      ...(this.activeAgent !== undefined ? { agent: this.activeAgent } : {}),
     });
   }
 
@@ -1302,8 +1310,12 @@ export class Orchestrator {
       adId: this.activeAdId,
       slateId: this.activeSlateId,
       placement: this.activePlacement,
+      // Stated, not inferred. The server backfills an absent platform to 'vscode' for builds older
+      // than the field; a build that says what it is never needs that path.
+      platform: CLIENT_PLATFORM,
       occurredAtClientMs: Date.now(),
       ...(visibleMs !== undefined ? { visibleMs } : {}),
+      ...(this.activeAgent !== undefined ? { agent: this.activeAgent } : {}),
     };
     this.queue.enqueue(event);
   }

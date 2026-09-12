@@ -1,6 +1,7 @@
 import type { AdSlateResponse } from '@awaitful/shared';
 import { AdSlateResponseSchema } from '@awaitful/shared';
 import { getJson, HttpError } from '../lib/http.js';
+import { CLIENT_PLATFORM } from '../lib/config.js';
 import { Rotation } from './rotation.js';
 
 export class SlateCache {
@@ -14,7 +15,12 @@ export class SlateCache {
   ) {}
 
   async refresh(token?: string): Promise<void> {
-    const url = `${this.apiUrl}/v1/ad?placement=${encodeURIComponent(this.placement)}`;
+    // `platform` matters only for an anonymous fetch: once this device is linked, the server reads
+    // the platform stamped on its token instead, which the client cannot rewrite. Sent on every
+    // request regardless, so there is one URL shape rather than two.
+    const url =
+      `${this.apiUrl}/v1/ad?placement=${encodeURIComponent(this.placement)}` +
+      `&platform=${encodeURIComponent(CLIENT_PLATFORM)}`;
     const raw = await getJson<unknown>(url, token);
     // Double-cast: Zod's inferred type uses `url: string | undefined` but our TypeScript
     // interface uses `url?: string` (exactOptionalPropertyTypes). The parse guarantees

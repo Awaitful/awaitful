@@ -37,6 +37,7 @@ free-text field, no path, no buffer, no file content anywhere in this table.
 | field | what it is |
 | --- | --- |
 | `placement` | which surface is rendering (`status-bar`, `thinking-line`, `chat-banner`, …) |
+| `platform` | which Awaitful client is running: `vscode`, `macos`, or `browser`. One of three fixed values, nothing else. It lets us stop one client having problems without stopping the others. |
 | `hints` | **coarse, opt-in only** (e.g. hour-of-day). Never content. Off unless you enable it. |
 
 Plus your device token in the `Authorization` header (see §Device token).
@@ -56,9 +57,15 @@ A batch of `{ deviceId, events[] }`. Each event carries **only**:
 | `placement` | which surface showed it |
 | `occurredAtClientMs` | a timestamp (advisory; the server stamps its own receipt time) |
 | `visibleMs` | how many milliseconds the line was actually visible (capped server-side) |
+| `platform` | which Awaitful app reported it - one of `vscode`, `macos`, `browser`. Nothing about your machine, just which of our own clients is speaking |
+| `agent` | which coding agent was thinking - today only `claude-code`. Not what it was doing, only which one it was |
 
 That is the complete list. "How long a sponsored line was on screen" is the *most* specific
 thing Awaitful learns about your session.
+
+`platform` and `agent` are fixed lists, not free text - a value outside them is rejected before it
+is stored, which is checked by the tests linked above. They exist so your earnings can be shown
+per app and per agent, and so limits can be set separately for each.
 
 The batch's `deviceId` is a random UUID this machine makes up for itself. It is never a hostname,
 MAC address or serial number, so it says nothing about your hardware. It now stays on this machine
@@ -67,7 +74,8 @@ to your device list. Nothing new leaves your machine as a result: it is the same
 here, only used to group your own sessions.
 
 ### 3. Check the killswitch - `GET /v1/killswitch`
-No body. Returns whether ads are paused fleet-wide.
+No body. Sends one field, `platform` - the same `vscode` / `macos` / `browser` value as above, so the
+answer can be about the client that is asking. Returns whether ads are paused, and why.
 
 ### 4. Patch-health report - `POST /v1/patch/report`  *(patch mode only)*
 When you opt into a surface that modifies Claude Code, the client verifies Claude Code's own
@@ -168,6 +176,43 @@ status line is preserved and restored when you turn the surface off.
 - We do **not** fingerprint you across sites; there is no third-party tracker in the client.
 - We do **not** ship ad-rendering or glow code from the server - the code that runs is in this
   source tree, and the client re-verifies every byte before it patches anything.
+
+## The Mac app checks for its own updates
+
+The macOS app uses [Sparkle](https://sparkle-project.org), the standard updater for Mac apps that are
+not sold through the App Store. It asks `awaitful.com` whether a newer version exists, and if you
+accept one, downloads it from our GitHub releases. That is the only reason it contacts anything other
+than the ad server, and it is the same mechanism most Mac apps outside the App Store use.
+
+That check carries a short description of the machine, so we can tell which macOS versions and which
+kind of Mac people actually run:
+
+| what | why it is useful |
+| --- | --- |
+| macOS version | when we can require a newer macOS and stop supporting an old one |
+| Mac model, processor type and core count | whether an Intel build is still worth shipping |
+| memory | the same question, for machines that are simply old |
+| preferred language | whether translating the app would reach anybody |
+| the app version you are on | whether a release is reaching people or getting stuck |
+
+It is sent occasionally rather than on every check, it is not tied to your account, and it never
+travels with your device token. It tells us about the computer, never about you or your work: no
+name, no address, no serial number, and nothing at all about your code, your prompts or what your
+agent is doing. Those remain governed by the rule at the top of this document.
+
+**Turning it off.** The Mac app's Settings window has a switch for checking for updates. Turning it
+off stops the check, and stops this being sent with it. You will then need to update the app
+yourself, which is the trade.
+
+## One thing we do keep: where you signed in from
+
+When you sign in on the website, your session record keeps the IP address the request came from, the
+way essentially every site with a login does. It is used to spot one person quietly running several
+accounts, and for nothing else - not advertising, not targeting, and never shared.
+
+To be exact about it: this comes from your **browser**, not from your editor or the Mac app. Those
+sign in with a device token that carries no address, so an agent thinking on your machine tells us
+nothing about where you are.
 
 ## How to check for yourself
 - **All egress in one file, and proven so:** every server call goes through

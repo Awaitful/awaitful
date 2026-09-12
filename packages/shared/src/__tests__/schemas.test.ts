@@ -14,7 +14,15 @@ import { DEFAULTS } from '../constants.js';
 
 describe('PlacementIdSchema', () => {
   it('accepts valid placement ids', () => {
-    const valid = ['status-bar', 'thinking-line', 'terminal', 'browser'] as const;
+    const valid = [
+      'status-bar',
+      'thinking-line',
+      'terminal',
+      'browser',
+      'chat-banner',
+      'menu-bar',
+      'hud',
+    ] as const;
     for (const id of valid) {
       expect(PlacementIdSchema.parse(id)).toBe(id);
     }
@@ -22,6 +30,43 @@ describe('PlacementIdSchema', () => {
 
   it('rejects unknown placement id', () => {
     expect(() => PlacementIdSchema.parse('unknown')).toThrow();
+  });
+});
+
+describe('AdEventSchema platform + agent', () => {
+  const base = {
+    eventId: '00000000-0000-4000-8000-000000000000',
+    type: 'view_threshold_met',
+    adId: 'ad-1',
+    slateId: 'slate-1',
+    placement: 'status-bar',
+    occurredAtClientMs: 1_700_000_000_000,
+  };
+
+  /**
+   * The installed extension fleet upgrades on its users' schedule, not ours, and every published
+   * build predates these fields. If they ever become required, every one of those clients starts
+   * failing validation at /v1/events — an outage, not a migration. This test is the tripwire.
+   */
+  it('accepts an event with neither platform nor agent (the published fleet)', () => {
+    const parsed = AdEventSchema.parse(base);
+    expect(parsed.platform).toBeUndefined();
+    expect(parsed.agent).toBeUndefined();
+  });
+
+  it('accepts a desktop event naming its platform and agent', () => {
+    const parsed = AdEventSchema.parse({
+      ...base,
+      placement: 'menu-bar',
+      platform: 'macos',
+      agent: 'claude-code',
+    });
+    expect(parsed.platform).toBe('macos');
+    expect(parsed.agent).toBe('claude-code');
+  });
+
+  it('rejects an unknown platform rather than storing a free-text string', () => {
+    expect(() => AdEventSchema.parse({ ...base, platform: 'whatever' })).toThrow();
   });
 });
 
@@ -57,8 +102,32 @@ describe('AdSlateResponseSchema', () => {
     expect(() => AdSlateResponseSchema.parse(bad)).toThrow();
   });
 
-  it('rejects empty rotation', () => {
-    expect(() => AdSlateResponseSchema.parse({ ...validSlate, rotation: [] })).toThrow();
+  /**
+   * An empty rotation is "nothing to show", not a malformed slate. It is exactly what /v1/ad
+   * returns for a placement whose platform is still gated, so a client built on this schema has to
+   * accept it — when this was `.min(1)`, such a client threw on every poll and never showed an ad.
+   */
+  it('accepts an empty rotation — the gated-placement response', () => {
+    const parsed = AdSlateResponseSchema.parse({ ...validSlate, rotation: [] });
+    expect(parsed.rotation).toEqual([]);
+  });
+
+  /**
+   * The zero-bid house fallback bills nobody and pays nothing, and AUCTION.md requires every
+   * surface to say so. `unpaid` was absent from CreativeSchema, so zod silently dropped it and no
+   * client ever saw it — the disclosure could not render even though the server sent the flag.
+   */
+  it('carries `unpaid` through instead of stripping it', () => {
+    const parsed = AdSlateResponseSchema.parse({
+      ...validSlate,
+      rotation: [{ adId: 'a', campaignId: 'house', line: 'Powered by Awaitful', unpaid: true }],
+    });
+    expect(parsed.rotation[0]?.unpaid).toBe(true);
+  });
+
+  it('leaves `unpaid` undefined on an ordinary paid creative', () => {
+    const parsed = AdSlateResponseSchema.parse(validSlate);
+    expect(parsed.rotation[0]?.unpaid).toBeUndefined();
   });
 });
 

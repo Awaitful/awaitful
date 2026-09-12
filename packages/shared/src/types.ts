@@ -1,4 +1,32 @@
-export type PlacementId = 'status-bar' | 'thinking-line' | 'terminal' | 'browser' | 'chat-banner';
+/**
+ * WHERE an ad renders. Drives the rate-card weight, i.e. pricing. User-facing copy calls this an
+ * "ad format" — `placement` is internal jargon and must never appear in the UI (ARCHITECTURE.md).
+ *
+ * `menu-bar` / `hud` are the macOS desktop formats. They are gated (see GATED_PLACEMENTS on the
+ * server) and serve nothing until the platform is switched on, so listing them here is safe.
+ */
+export type PlacementId =
+  | 'status-bar'
+  | 'thinking-line'
+  | 'terminal'
+  | 'browser'
+  | 'chat-banner'
+  | 'menu-bar'
+  | 'hud';
+
+/**
+ * WHICH CLIENT is reporting. Deliberately separate from `PlacementId` and `AgentId`: those three
+ * used to be collapsed into `placement`, which worked only while exactly one client existed.
+ *
+ *   platform  — the binary: caps and limits, killswitch scope, dashboard grouping, release train
+ *   placement — where the ad drew: pricing
+ *   agent     — which AI was thinking: attribution
+ *
+ * They are genuinely independent. `terminal` can be served by more than one platform, and
+ * `menu-bar` says nothing about which agent was working. Per-platform caps have nowhere to hang
+ * without this axis, which is why it exists.
+ */
+export type PlatformId = 'vscode' | 'macos' | 'browser';
 
 export type AdEventType =
   | 'impression_rendered'
@@ -63,6 +91,18 @@ export interface AdEvent {
   placement: PlacementId;
   occurredAtClientMs: number;
   visibleMs?: number;
+  /**
+   * Which client reported this, and which agent was thinking. Both are coarse closed enums — never
+   * free text, never content (golden rule 1).
+   *
+   * OPTIONAL, and they must stay that way. Every already-published extension build is running code
+   * that will never send them, and those copies upgrade on their users' schedule rather than ours.
+   * A required field here is an instant outage for the installed fleet. The server backfills
+   * `platform: 'vscode'` when absent (see routes/v1/events.ts), which is true of every build that
+   * predates this field.
+   */
+  platform?: PlatformId;
+  agent?: AgentId;
 }
 
 export interface EventBatch {

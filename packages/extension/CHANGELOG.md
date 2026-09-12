@@ -4,6 +4,14 @@ Every meaningful change to Awaitful is dated and published, in full, at
 **https://awaitful.com/changelog** (and in your dashboard). That page is the canonical log, dated to the
 day each change shipped; this file mirrors the highlights of recent releases.
 
+## 0.7.7
+
+- When we pause something from our side, Awaitful says so. Patching used to just stop, which looked
+  like a broken install rather than a deliberate pause, and left you hunting for a fault on your own
+  machine that was not there.
+- Awaitful can now share a machine with other Awaitful clients. Previously each one removed the
+  other's connection to Claude Code when it installed, so only the most recent survived.
+
 ## 0.7.6
 
 - Two-way sync. Picking an ad format on any synced machine now sets it for your account, so your other

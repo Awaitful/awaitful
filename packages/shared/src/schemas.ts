@@ -1,6 +1,34 @@
 import { z } from 'zod';
+import { AD_CREATIVE } from './constants.js';
 
-export const PlacementIdSchema = z.enum(['status-bar', 'thinking-line', 'terminal', 'browser', 'chat-banner']);
+export const PlacementIdSchema = z.enum([
+  'status-bar',
+  'thinking-line',
+  'terminal',
+  'browser',
+  'chat-banner',
+  'menu-bar',
+  'hud',
+]);
+
+/** Which client is reporting (see PlatformId in types.ts for why this is its own axis). */
+export const PlatformIdSchema = z.enum(['vscode', 'macos', 'browser']);
+
+/** The same list at runtime, for anything that must enumerate every platform - the per-platform
+ *  killswitch board, say. Derived from the schema so a new platform cannot be added to one and
+ *  forgotten in the other. */
+export const PLATFORM_IDS = PlatformIdSchema.options;
+
+/**
+ * Which agent was thinking. Declared here rather than beside the recipe schemas that also use it,
+ * because `AdEventSchema` below references it and a module-level const cannot be read before it is
+ * declared. Keep it above the first use.
+ */
+export const AgentIdSchema = z.enum(['claude-code']);
+
+/** The same list at runtime, for validating an id that arrived as a bare string (a hook's query
+ *  parameter, say). Derived from the schema so the two cannot drift apart. */
+export const AGENT_IDS = AgentIdSchema.options;
 
 /** The subset of PlacementId a developer may set as their account-wide remote surface preference. */
 export const RemoteSurfaceIdSchema = z.enum(['status-bar', 'thinking-line', 'chat-banner']);
@@ -86,7 +114,7 @@ export const AdEventTypeSchema = z.enum([
 export const CreativeSchema = z.object({
   adId: z.string().min(1),
   campaignId: z.string().min(1),
-  line: z.string().min(3).max(60),
+  line: z.string().min(AD_CREATIVE.lineMin).max(AD_CREATIVE.lineMax),
   url: z.string().url().optional(),
   brand: z
     .object({
@@ -94,11 +122,22 @@ export const CreativeSchema = z.object({
       iconUrl: z.string().url().optional(),
     })
     .optional(),
+  // Must be declared here or zod strips it - the same trap as prefsVersion below. The server sets
+  // `unpaid: true` on the zero-bid house fallback (auction/slate-builder.ts) and AUCTION.md requires
+  // every surface to SAY that ad bills nobody and pays nothing rather than implying earnings. While
+  // this key was undeclared, z.object() dropped it on the way in, so the client's `activeAdUnpaid`
+  // was permanently false and that disclosure never rendered once.
+  unpaid: z.boolean().optional(),
 });
 
 export const AdSlateResponseSchema = z.object({
   slateId: z.string().min(1),
-  rotation: z.array(CreativeSchema).min(1),
+  // NOT `.min(1)`. An empty rotation is a legitimate server answer meaning "nothing to show": it is
+  // what /v1/ad returns for a placement whose platform has not been released yet (lib/placements.ts
+  // GATED_PLACEMENTS). Requiring at least one creative made that response unparseable by any client
+  // built on this schema - every poll would throw and the slate would never populate. The empty case
+  // is already handled downstream: Rotation.next() returns undefined for an empty list.
+  rotation: z.array(CreativeSchema),
   rotateEverySeconds: z.number().int().positive(),
   etag: z.string().min(1),
   killswitch: z.boolean(),
@@ -117,6 +156,11 @@ export const AdEventSchema = z.object({
   placement: PlacementIdSchema,
   occurredAtClientMs: z.number().int().positive(),
   visibleMs: z.number().int().nonnegative().optional(),
+  // Coarse closed enums, never content. OPTIONAL on purpose and permanently so: already-published
+  // extension builds never send them, and a required field would reject the installed fleet's
+  // events outright. See the AdEvent interface in types.ts.
+  platform: PlatformIdSchema.optional(),
+  agent: AgentIdSchema.optional(),
 });
 
 export const EventBatchSchema = z.object({
@@ -135,9 +179,30 @@ export const KillswitchResponseSchema = z.object({
   reason: z.string().optional(),
 });
 
+/**
+ * What a client tells `/v1/killswitch` about itself, so the answer can be scoped to its platform.
+ *
+ * The scope travels as a REQUEST parameter, and the response shape above is deliberately untouched.
+ * The obvious alternative - adding a `platforms: string[]` to the response - is unshippable here:
+ * every published build upgrades on its users' schedule, so a client older than the field would
+ * ignore the array, read `killed: false`, and a kill aimed at one platform would never reach the
+ * fleet it was aimed at. A parameter degrades the other way. An old client sends nothing and gets
+ * the GLOBAL answer, which is the only thing it ever understood.
+ *
+ * Optional, and permanently so, for that same reason.
+ */
+export const KillswitchQuerySchema = z.object({
+  platform: PlatformIdSchema.optional(),
+});
+
 export const GetAdQuerySchema = z.object({
   placement: PlacementIdSchema,
   hints: z.string().optional(),
+  // Which client is asking, so a platform-scoped kill can be enforced server-side rather than
+  // trusted to the client that may be the thing being killed. Advisory only: for a linked device the
+  // server prefers the platform stamped on its device token, which the client cannot rewrite. This
+  // is the fallback for anonymous, pre-link requests. Optional permanently (published fleet).
+  platform: PlatformIdSchema.optional(),
 });
 
 export type PlacementIdInput = z.input<typeof PlacementIdSchema>;
@@ -148,6 +213,7 @@ export type AdEventInput = z.input<typeof AdEventSchema>;
 export type EventBatchInput = z.input<typeof EventBatchSchema>;
 export type EventBatchAckInput = z.input<typeof EventBatchAckSchema>;
 export type KillswitchResponseInput = z.input<typeof KillswitchResponseSchema>;
+export type KillswitchQueryInput = z.input<typeof KillswitchQuerySchema>;
 export type GetAdQueryInput = z.input<typeof GetAdQuerySchema>;
 
 // ── Campaign CRUD ──────────────────────────────────────────────────────────────
@@ -195,9 +261,9 @@ export const SitePrefillResultSchema = z.object({
   /** The URL we actually ended up at, after redirects. Apex -> www is the common case. */
   finalUrl: z.string(),
   /** A suggested ad line, already cut to the 60-character contract. */
-  line: z.string().max(60).optional(),
+  line: z.string().max(AD_CREATIVE.lineMax).optional(),
   /** og:site_name, or the site's title with any trailing tagline removed. */
-  brandName: z.string().max(40).optional(),
+  brandName: z.string().max(AD_CREATIVE.brandNameMax).optional(),
   /**
    * The site's icon, ALREADY downloaded and processed into the same bounded WebP `data:` URI a
    * logo upload produces. Never a remote URL: a developer's editor must never fetch from an
@@ -209,9 +275,12 @@ export const SitePrefillResultSchema = z.object({
 });
 
 export const CreateCampaignSchema = z.object({
-  line: z.string().min(3, 'At least 3 characters').max(60, 'At most 60 characters'),
+  line: z
+    .string()
+    .min(AD_CREATIVE.lineMin, `At least ${AD_CREATIVE.lineMin} characters`)
+    .max(AD_CREATIVE.lineMax, `At most ${AD_CREATIVE.lineMax} characters`),
   url: httpUrl('Must be a valid URL').optional(),
-  brandName: z.string().max(40).optional(),
+  brandName: z.string().max(AD_CREATIVE.brandNameMax).optional(),
   brandIconUrl: httpUrl('Must be a valid URL').optional(),
   brandIconData: uploadedIcon.optional(),
   bidCpm: z.number().positive().min(0.01, 'Minimum bid is $0.01'),
@@ -223,9 +292,9 @@ export const CreateCampaignSchema = z.object({
 });
 
 export const UpdateCampaignSchema = z.object({
-  line: z.string().min(3).max(60).optional(),
+  line: z.string().min(AD_CREATIVE.lineMin).max(AD_CREATIVE.lineMax).optional(),
   url: httpUrl().nullable().optional(),
-  brandName: z.string().max(40).nullable().optional(),
+  brandName: z.string().max(AD_CREATIVE.brandNameMax).nullable().optional(),
   brandIconUrl: httpUrl().nullable().optional(),
   brandIconData: uploadedIcon.nullable().optional(),
   bidCpm: z.number().positive().min(0.01).optional(),
@@ -239,10 +308,16 @@ export const UpdateCampaignSchema = z.object({
  * House ads play by one different rule: a $0 bid is legitimate.
  *
  * For a real advertiser a $0 bid is just a confusing way to pause, so UpdateCampaignSchema floors it
- * at $0.01. But a house ad at $0 is a real, useful state - "filler only": it shows when nothing else
- * wins and earns the viewer nothing (the seeded house ad is exactly this). Without $0 here, the
- * platform's own filler ad could never be edited, and a paid house ad could never be turned back into
- * filler without deleting it.
+ * at $0.01. A house ad may sit at $0 for exactly one reason: it takes the ad OUT OF THE AUCTION
+ * while leaving the row editable. The seeded fallback creative is genuinely $0, and a paid house ad
+ * has to be able to return to $0 without being deleted (there is no delete).
+ *
+ * $0 is NOT "filler that shows when nothing else wins", and this comment used to say it was. The
+ * draw is weighted by bid, so a weight of zero is drawn NEVER: the ad does not serve, pays no
+ * developer, and looks perfectly healthy while doing neither. An operator read the old wording,
+ * set $0 to slow the subsidy burn, and every developer's earnings stopped for eleven hours. The one
+ * creative that really does show when nothing wins is the seeded fallback, and it gets there by
+ * bypassing the auction entirely rather than by bidding zero.
  */
 export const UpdateHouseAdSchema = UpdateCampaignSchema.extend({
   bidCpm: z.number().min(0).optional(),
@@ -253,7 +328,7 @@ export type UpdateCampaignInputZod = z.infer<typeof UpdateCampaignSchema>;
 
 // ── Recipe delivery (patch mode) ────────────────────────────────────────────────
 
-export const AgentIdSchema = z.enum(['claude-code']);
+// AgentIdSchema is declared at the top of this file (AdEventSchema needs it before this point).
 export const PatchStrategyIdSchema = z.enum(['append-shim', 'csp-insert']);
 const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/, 'must be a 64-char hex sha256');
 

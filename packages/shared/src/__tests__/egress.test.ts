@@ -5,6 +5,7 @@ import {
   EventBatchSchema,
   GetAdQuerySchema,
   GetRecipeQuerySchema,
+  KillswitchQuerySchema,
   PatchReportRequestSchema,
   DeviceLinkStartRequestSchema,
   DeviceLinkPollQuerySchema,
@@ -25,6 +26,7 @@ import {
  *
  * Coverage is every request the client makes that carries a body or query:
  *   GET  /v1/ad               — GetAdQuerySchema
+ *   GET  /v1/killswitch       — KillswitchQuerySchema
  *   GET  /v1/recipe           — GetRecipeQuerySchema
  *   POST /v1/events           — EventBatchSchema (each event: AdEventSchema)
  *   POST /v1/patch/report     — PatchReportRequestSchema
@@ -34,10 +36,10 @@ import {
  *   POST /v1/me/surface-choice — RemoteSurfacePreferenceRequestSchema (two-way sync; synced devices only)
  *   POST /v1/auth/link/start  — DeviceLinkStartRequestSchema
  *   GET  /v1/auth/link/poll   — DeviceLinkPollQuerySchema
- * The remaining calls — GET /v1/killswitch, /v1/me, /v1/earnings/summary — are parameterless: no
- * body, no query, just the Bearer token. That there is no body on ANY GET is pinned separately by
- * the chokepoint test at packages/extension/src/__tests__/http.egress.test.ts, so those three
- * cannot smuggle content either.
+ * The remaining calls — GET /v1/me, /v1/earnings/summary — are parameterless: no body, no query,
+ * just the Bearer token. That there is no body on ANY GET is pinned separately by the chokepoint
+ * test at packages/extension/src/__tests__/http.egress.test.ts, so those two cannot smuggle content
+ * either.
  *
  * If you are changing this test, you are changing what leaves a developer's machine.
  * Update PRIVACY.md in the same change and keep the field list honest.
@@ -49,9 +51,23 @@ function keysOf(schema: z.ZodObject<z.ZodRawShape>): string[] {
 }
 
 describe('egress whitelist — what leaves the machine', () => {
-  it('GET /v1/ad query carries only placement + coarse opt-in hints', () => {
+  it('GET /v1/ad query carries only placement, coarse opt-in hints, and which client is asking', () => {
     // hints is coarse + opt-in (e.g. hour-of-day) — never user content.
-    expect(keysOf(GetAdQuerySchema)).toEqual(['hints', 'placement']);
+    //
+    // `platform` is a closed enum of three constants ('vscode' | 'macos' | 'browser') naming which
+    // of our own clients is running. It reveals nothing about the developer or their work that the
+    // server does not already hold: a linked device's platform is stamped on its device token at
+    // link time, and every ad event already carries the same field. It is here so a platform-scoped
+    // killswitch can be enforced server-side for an ANONYMOUS client too — one that has no token to
+    // read it from — and stopping a misbehaving client is precisely the case where its own
+    // cooperation cannot be assumed.
+    expect(keysOf(GetAdQuerySchema)).toEqual(['hints', 'placement', 'platform']);
+  });
+
+  it('GET /v1/killswitch query carries only which client is asking', () => {
+    // Same closed enum, same reasoning, and the poll is unauthenticated - so naming the platform is
+    // the only way the answer can be scoped to the client asking for it.
+    expect(keysOf(KillswitchQuerySchema)).toEqual(['platform']);
   });
 
   it('GET /v1/recipe query carries only the agent + build id + rollout channel', () => {
@@ -64,11 +80,17 @@ describe('egress whitelist — what leaves the machine', () => {
   });
 
   it('an ad event carries only render/visibility accounting — no content', () => {
+    // `platform` and `agent` are coarse closed enums ('vscode' | 'macos' | 'browser';
+    // 'claude-code'), added so earnings and caps can be broken down per client and per agent.
+    // Both are constrained by z.enum, so neither can carry a free-text value — the rejection is
+    // pinned in schemas.test.ts.
     expect(keysOf(AdEventSchema)).toEqual([
       'adId',
+      'agent',
       'eventId',
       'occurredAtClientMs',
       'placement',
+      'platform',
       'slateId',
       'type',
       'visibleMs',

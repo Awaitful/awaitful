@@ -1,6 +1,6 @@
 import * as http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import type { PlacementId } from '@awaitful/shared';
+import { AGENT_IDS, type AgentId, type PlacementId } from '@awaitful/shared';
 import { SHIM_VERSION } from '../patch/recipe.js';
 
 /** What the shim needs to paint the sponsored line. Host-internal (not the server contract). */
@@ -71,7 +71,14 @@ export interface SurfaceAttestation {
 }
 
 type Callbacks = {
-  onStart(): void;
+  /**
+   * A turn began. `agent` is who said so, when the hook named itself.
+   *
+   * OPTIONAL, and permanently: hooks already written into developers' settings.json predate the
+   * parameter, and those files are only rewritten when the extension reinstalls them. Absent means
+   * "we do not know" - never 'claude-code', which would be a guess recorded as a fact.
+   */
+  onStart(agent?: AgentId): void;
   onStop(): void;
   /** Claude paused mid-turn to wait for the user (permission prompt / elicitation). */
   onPause(): void;
@@ -151,11 +158,21 @@ export class HookServer {
 
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
-    // Thinking hooks (fired by Claude Code's settings.json curl commands).
-    if (method === 'POST' && url === '/thinking/start') { res.writeHead(200).end('ok'); this.cb.onStart(); return; }
-    if (method === 'POST' && url === '/thinking/stop') { res.writeHead(200).end('ok'); this.cb.onStop(); return; }
-    if (method === 'POST' && url === '/thinking/pause') { res.writeHead(200).end('ok'); this.cb.onPause(); return; }
-    if (method === 'POST' && url === '/thinking/resume') { res.writeHead(200).end('ok'); this.cb.onResume(); return; }
+    // Thinking hooks (fired by an agent's settings.json curl commands). The path may carry
+    // ?agent=<id>; an older installed hook does not, and that is handled as unknown rather than
+    // assumed. An id we do not recognise is also unknown - it is not this build's agent, and
+    // forwarding it would put an unvalidated value on the wire the server's enum then rejects.
+    if (method === 'POST' && url.startsWith('/thinking/')) {
+      const [path, query] = url.split('?', 2);
+      const raw = query ? new URLSearchParams(query).get('agent') : null;
+      const agent = raw && (AGENT_IDS as readonly string[]).includes(raw) ? (raw as AgentId) : undefined;
+      switch (path) {
+        case '/thinking/start': res.writeHead(200).end('ok'); this.cb.onStart(agent); return;
+        case '/thinking/stop': res.writeHead(200).end('ok'); this.cb.onStop(); return;
+        case '/thinking/pause': res.writeHead(200).end('ok'); this.cb.onPause(); return;
+        case '/thinking/resume': res.writeHead(200).end('ok'); this.cb.onResume(); return;
+      }
+    }
 
     // Surface channel (fired by the in-webview shim).
     if (method === 'GET' && url.startsWith('/surface/hello')) {

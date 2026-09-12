@@ -41,15 +41,11 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-// Also recognize the pre-rename script path for one release, so an upgrade can restore/clean a
-// status line the old "CodeCue" build installed (which pointed at ~/.codecue/statusline.sh).
-const LEGACY_SCRIPT_PATH = '.codecue/statusline.sh';
-
 /** True when the settings' statusLine is the one WE installed (its command runs our script). */
 function isOurs(entry: unknown, scriptPath: string): entry is StatusLineEntry {
   if (!entry || typeof entry !== 'object') return false;
   const cmd = (entry as StatusLineEntry).command;
-  return typeof cmd === 'string' && (cmd.includes(scriptPath) || cmd.includes(LEGACY_SCRIPT_PATH));
+  return typeof cmd === 'string' && cmd.includes(scriptPath);
 }
 
 /**

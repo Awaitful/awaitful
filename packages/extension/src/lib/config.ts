@@ -1,7 +1,24 @@
 import * as vscode from 'vscode';
+import type { PlatformId } from '@awaitful/shared';
 
 // Injected at build time from the API_BASE_URL environment variable.
 declare const AWAITFUL_API_BASE_URL: string;
+
+/**
+ * Which client this build is, on the platform axis.
+ *
+ * `vscode` is the whole family, not the app: this same build runs in Cursor, Devin, VSCodium and VS
+ * Code Insiders, and one platform switch covers all of them. The distinction that matters to the
+ * server is which BINARY is reporting - the thing that can be released, capped, or killed - and by
+ * that measure they are one client.
+ *
+ * Stated by the client rather than inferred, so it matches what the Mac app has always sent. The
+ * server does backfill an absent platform to `vscode` (routes/v1/events.ts), which is a fact about
+ * builds published before the field existed rather than a guess - but a client that says what it is
+ * needs no backfill, and "the server infers it for one client and not the other" is exactly the kind
+ * of asymmetry that makes behaviour hard to predict.
+ */
+export const CLIENT_PLATFORM: PlatformId = 'vscode';
 
 export function apiBaseUrl(): string {
   const override = vscode.workspace.getConfiguration('awaitful').get<string>('apiBaseUrl');

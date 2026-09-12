@@ -1,3 +1,4 @@
+import type { AgentId } from '@awaitful/shared';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { awaitfulDir, claudeSettingsExists, readClaudeSettings, writeClaudeSettings } from './claudeSettings.js';
@@ -9,11 +10,21 @@ function portFile(): string {
 // Marker appended to hook commands so we can identify and update them without
 // touching any other hooks the user may have configured.
 const HOOK_MARKER = '# awaitful';
-// Transitional (one release): also recognize the pre-rename marker so an upgrade replaces/cleans
-// hooks the old "CodeCue" build left in the user's settings.json. Drop after the first release cycle.
-const LEGACY_HOOK_MARKER = '# codecue';
-const isOurHookCommand = (command: string): boolean =>
-  command.includes(HOOK_MARKER) || command.includes(LEGACY_HOOK_MARKER);
+
+/**
+ * Does this command belong to the platform that owns `marker`?
+ *
+ * Markers are appended at the END of the command, so ownership is a TAIL match — deliberately not
+ * `.includes()`. `~/.claude/settings.json` is machine-global and shared by every Awaitful client on
+ * it, and a peer platform's marker is this one's marker plus a suffix: `'# awaitful:macos'`
+ * contains `'# awaitful'`. With a substring test, whichever client installed second would strip the
+ * other's hook, and each would keep silently un-installing the other on every reconcile. A tail
+ * match makes the two disjoint, so peers coexist.
+ */
+const ownsHookCommand = (command: string, marker: string): boolean =>
+  command.trimEnd().endsWith(marker);
+
+const isOurHookCommand = (command: string): boolean => ownsHookCommand(command, HOOK_MARKER);
 
 type HookCommand = { type: string; command: string };
 type HookGroup = { matcher?: string; hooks: HookCommand[] };
@@ -54,7 +65,16 @@ const HOOK_EVENTS: readonly string[] = [...new Set(HOOK_SPECS.map((h) => h.event
 
 function hookCommand(pathSuffix: string): string {
   const portExpr = `$(cat "$HOME/.awaitful/port" 2>/dev/null)`;
-  return `{ _p=${portExpr} && curl -fsSL -m 2 -X POST "http://localhost:$_p${pathSuffix}" >/dev/null 2>&1; } ${HOOK_MARKER}`;
+  // The callback names the agent that fired it. The host cannot tell one agent from another - every
+  // agent's hook is an identical shell command arriving on the same port - so without this, a
+  // machine running two agents would have every impression attributed to whichever one happened to
+  // be registered. That is attribution invented rather than observed.
+  //
+  // Hooks already installed on developers' machines do NOT carry it, and they upgrade on their own
+  // schedule. An absent agent therefore has to mean "we do not know" rather than "claude-code",
+  // which is why the whole chain below treats it as optional.
+  const agent: AgentId = 'claude-code';
+  return `{ _p=${portExpr} && curl -fsSL -m 2 -X POST "http://localhost:$_p${pathSuffix}?agent=${agent}" >/dev/null 2>&1; } ${HOOK_MARKER}`;
 }
 
 /**
@@ -111,8 +131,10 @@ export async function removeClaudeHooks(): Promise<void> {
 }
 
 function upsert(existing: HookGroup[], command: string, matcher?: string): HookGroup[] {
+  // Replace only OUR hook. A tail match (not `.includes`) is what leaves a peer platform's
+  // `# awaitful:<platform>` hook in place — see ownsHookCommand.
   const without = existing.filter(
-    (group) => !group.hooks.some((h) => h.command.includes(HOOK_MARKER)),
+    (group) => !group.hooks.some((h) => ownsHookCommand(h.command, HOOK_MARKER)),
   );
   const group: HookGroup =
     matcher !== undefined

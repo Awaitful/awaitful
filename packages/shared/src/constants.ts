@@ -23,6 +23,20 @@ export const DEFAULTS = {
 
 export type Defaults = typeof DEFAULTS;
 
+/**
+ * What an ad creative may contain.
+ *
+ * The ad line is ONE line in someone's editor, and 60 characters is the whole budget - it is a hard
+ * product constraint, not a database convenience. It had grown four separate copies (the wire
+ * schema, the create schema, the update schema, and the web form's own `LINE_MAX`), which is three
+ * chances for the form to accept a line the server then refuses.
+ */
+export const AD_CREATIVE = {
+  lineMin: 3,
+  lineMax: 60,
+  brandNameMax: 40,
+} as const;
+
 // Recipe crowd-consensus tuning (server publishes; client gates auto-apply).
 export const RECIPE = {
   consensusQuorum: 3,   // distinct clean devices needed before a hash can be served

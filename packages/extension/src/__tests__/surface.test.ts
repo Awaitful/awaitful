@@ -273,11 +273,11 @@ describe('HookServer', () => {
 });
 
 function makeCallbacks(
-  rec: { start: number; stop: number; pause: number; resume: number; rendered: number; visible: number; click: number; terminalTick?: number; hello?: number; attest?: number },
+  rec: { start: number; stop: number; pause: number; resume: number; rendered: number; visible: number; click: number; terminalTick?: number; hello?: number; attest?: number; agents?: (string | undefined)[] },
   overrides: { creative?: SurfaceCreative; terminalLine?: string | null } = {},
 ) {
   return {
-    onStart: () => { rec.start++; },
+    onStart: (agent?: string) => { rec.start++; rec.agents?.push(agent); },
     onStop: () => { rec.stop++; },
     onPause: () => { rec.pause++; },
     onResume: () => { rec.resume++; },
@@ -291,3 +291,62 @@ function makeCallbacks(
     onAttest: () => { rec.attest = (rec.attest ?? 0) + 1; },
   };
 }
+
+/**
+ * The thinking callback names the agent that fired it.
+ *
+ * The host cannot tell one agent from another - every agent's hook is an identical shell command
+ * arriving on the same port - so without this, a machine running two agents would attribute every
+ * impression to whichever one happened to be registered.
+ *
+ * The compatibility case matters as much as the feature: hooks already written into developers'
+ * settings.json carry no agent, and are rewritten only when the extension reinstalls them. Absent
+ * has to keep meaning "we do not know" rather than being filled in with the one agent we support.
+ */
+describe('HookServer agent attribution', () => {
+  let server: HookServer | undefined;
+  afterEach(() => { server?.dispose(); server = undefined; });
+
+  async function startWithAgents() {
+    const rec = {
+      start: 0, stop: 0, pause: 0, resume: 0, rendered: 0, visible: 0, click: 0,
+      terminalTick: 0, hello: 0, attest: 0, agents: [] as (string | undefined)[],
+    };
+    server = new HookServer(makeCallbacks(rec));
+    const port = await server.start();
+    return { port, rec };
+  }
+
+  it('passes through the agent a hook names', async () => {
+    const { port, rec } = await startWithAgents();
+    const res = await fetch(`http://127.0.0.1:${port}/thinking/start?agent=claude-code`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(rec.agents).toEqual(['claude-code']);
+  });
+
+  it('reports no agent for a hook installed before the callback named one', async () => {
+    const { port, rec } = await startWithAgents();
+    const res = await fetch(`http://127.0.0.1:${port}/thinking/start`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(rec.start).toBe(1);
+    expect(rec.agents).toEqual([undefined]);
+  });
+
+  it('ignores an agent it does not recognise rather than forwarding it', async () => {
+    // Not this build's agent. Passing the raw string on would put an unvalidated value on the wire,
+    // where the server's closed enum rejects the whole batch it travels in.
+    const { port, rec } = await startWithAgents();
+    await fetch(`http://127.0.0.1:${port}/thinking/start?agent=some-future-agent`, { method: 'POST' });
+    expect(rec.start).toBe(1);
+    expect(rec.agents).toEqual([undefined]);
+  });
+
+  it('still routes stop, pause and resume with a query attached', async () => {
+    const { port, rec } = await startWithAgents();
+    for (const signal of ['stop', 'pause', 'resume']) {
+      const res = await fetch(`http://127.0.0.1:${port}/thinking/${signal}?agent=claude-code`, { method: 'POST' });
+      expect(res.status).toBe(200);
+    }
+    expect([rec.stop, rec.pause, rec.resume]).toEqual([1, 1, 1]);
+  });
+});
