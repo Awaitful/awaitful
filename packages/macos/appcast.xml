@@ -1,0 +1,17 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>Awaitful for Mac</title>
+    <description>Updates for the Awaitful macOS app.</description>
+    <language>en</language>
+    <item>
+      <title>Version 0.1.0</title>
+      <pubDate>Mon, 14 Sep 2026 00:46:18 +0000</pubDate>
+      <sparkle:version>0.1.0</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description>&lt;p&gt;First release for macOS.&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Awaitful now works without a code editor. It shows one sponsored line while your coding agent is thinking, and you earn while that line is genuinely on screen.&lt;/li&gt;&lt;li&gt;Choose where it appears: a line in your menu bar, or a small panel near the top of your screen.&lt;/li&gt;&lt;li&gt;Link this Mac to your account once, and it earns alongside anything else you already have running.&lt;/li&gt;&lt;li&gt;Awaitful can open when you log in, so it is ready before your first agent run.&lt;/li&gt;&lt;li&gt;Awaitful never reads your code, your prompts, or anything your agent says. It detects only that an agent is working, and for how long.&lt;/li&gt;&lt;/ul&gt;</description>
+      <enclosure url="https://github.com/Awaitful/awaitful/releases/download/macos-v0.1.0/Awaitful-0.1.0.zip" length="1619879" type="application/octet-stream" sparkle:edSignature="R+sl/kdo1h28CWaqiUCpyvAXQ3f6l4YKmDlvGh2lsB+SPe/iVNfIfCLJD323/d340k4UvXajX13TAud6ZfeWCg==" />
+    </item>
+  </channel>
+</rss>
