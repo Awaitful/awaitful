@@ -5,6 +5,15 @@
     <description>Updates for the Awaitful macOS app.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.1</title>
+      <pubDate>Wed, 16 Sep 2026 16:24:26 +0000</pubDate>
+      <sparkle:version>0.1.1</sparkle:version>
+      <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description>&lt;ul&gt;&lt;li&gt;Settings has a sidebar. General, Agents and Ad Format sit down the left the way sections do in Finder and System Settings, with room for the settings still to come.&lt;/li&gt;&lt;li&gt;Settings now looks like the macOS you are running. The sidebar, switches and grouped boxes are drawn by your Mac, so they match it on this release of macOS and the next.&lt;/li&gt;&lt;li&gt;New Agents section. See which coding agents Awaitful found on this Mac and connect or disconnect each one. If an agent is not installed, it says so rather than asking you to connect it.&lt;/li&gt;&lt;li&gt;Linking this Mac now sits at the top of General. Once it is linked, Awaitful connects to the coding agents it finds and tells you it has. Connecting adds one line to your agent's own settings file and never changes the agent itself. If you disconnect an agent, it stays disconnected until you connect it again.&lt;/li&gt;&lt;li&gt;Opening Awaitful again from Finder or Spotlight now shows Settings. It used to appear to do nothing, because a menu bar app has no window to bring forward.&lt;/li&gt;&lt;li&gt;Awaitful can take itself back out cleanly. Before deleting the app, run `/Applications/Awaitful.app/Contents/MacOS/Awaitful --uninstall` in Terminal. It removes the lines Awaitful added to your agent's settings and stops it opening at login, and leaves everything else in those files alone.&lt;/li&gt;&lt;/ul&gt;</description>
+      <enclosure url="https://github.com/Awaitful/awaitful/releases/download/macos-v0.1.1/Awaitful-0.1.1.zip" length="1654873" type="application/octet-stream" sparkle:edSignature="pl2u1Qy7BmnHs+BEodL0SmJs8EQjxyadd4/yvEEF6FDlcRWZy2CLd/vD+MDSFFcfWQYEJZOYd4dN0BL+8m55AA==" />
+    </item>
+    <item>
       <title>Version 0.1.0</title>
       <pubDate>Mon, 14 Sep 2026 00:46:18 +0000</pubDate>
       <sparkle:version>0.1.0</sparkle:version>
