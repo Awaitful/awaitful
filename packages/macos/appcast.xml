@@ -5,6 +5,15 @@
     <description>Updates for the Awaitful macOS app.</description>
     <language>en</language>
     <item>
+      <title>Version 0.1.2</title>
+      <pubDate>Fri, 18 Sep 2026 16:38:58 +0000</pubDate>
+      <sparkle:version>0.1.2</sparkle:version>
+      <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description>&lt;ul&gt;&lt;li&gt;Awaitful now earns while OpenAI Codex is thinking: in the ChatGPT app (Codex and Work modes), in the terminal, and in VS Code. Codex asks you once to approve the hooks Awaitful adds, and Settings shows how far that has got and opens Codex for you when it is needed.&lt;/li&gt;&lt;li&gt;Claude Code earns in the Claude app's Code mode too. The Agents section now says where each agent works.&lt;/li&gt;&lt;li&gt;Each agent is followed on its own. When two work at once the ad stays up while either is thinking, and one agent never keeps it up for the other.&lt;/li&gt;&lt;li&gt;If one of Awaitful's Codex hooks is switched off, Awaitful pauses ads for Codex and says how to switch it back on. A conversation that was open at the time cannot say when it stops, so ads for Codex wait until you quit and reopen the app it is in.&lt;/li&gt;&lt;li&gt;Ads come down more reliably when your agent stops.&lt;/li&gt;&lt;li&gt;The ad has a new look: a capsule that fits its whole line, with the Awaitful logo, in light and dark mode. Pick its border color in Ad Format: a new one each time your agent starts thinking, one you choose, or Monochrome to match the other icons in your menu bar.&lt;/li&gt;&lt;li&gt;Ad Format shows a picture of each format. Click one to choose it, and click where the desktop panel should sit on a picture of your screen.&lt;/li&gt;&lt;li&gt;Pause Awaitful and Resume Awaitful in the menu say what they do, and the menu and buttons have symbols. Check for updates from Settings, under General.&lt;/li&gt;&lt;li&gt;`--uninstall` now asks before it changes anything, removes everything Awaitful put on your Mac, and tells you what is left to do. Add `--yes` to skip the question, or `--forget-approvals` to also clear Codex's record of approving Awaitful, so installing again starts fresh.&lt;/li&gt;&lt;/ul&gt;</description>
+      <enclosure url="https://github.com/Awaitful/awaitful/releases/download/macos-v0.1.2/Awaitful-0.1.2.zip" length="2025839" type="application/octet-stream" sparkle:edSignature="QMDP161Frhrrto1JH+IthDNmz/FTRh2mzGKb5VnQ9FJES1ckeRIS4VzBUiFlNadconfQgBMbgawDX5o5yX84CA==" />
+    </item>
+    <item>
       <title>Version 0.1.1</title>
       <pubDate>Wed, 16 Sep 2026 16:24:26 +0000</pubDate>
       <sparkle:version>0.1.1</sparkle:version>
